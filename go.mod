@@ -28,7 +28,7 @@ require (
 	github.com/aws/smithy-go v1.20.4
 	github.com/buengese/sgzip v0.1.1
 	github.com/cloudinary/cloudinary-go/v2 v2.9.0
-	github.com/cloudsoda/go-smb2 v0.0.0-20241223203758-52b943b88fd6
+	github.com/cloudsoda/go-smb2 v0.0.0-20250124173933-e6bbeea507ed
 	github.com/colinmarc/hdfs/v2 v2.4.0
 	github.com/coreos/go-semver v0.3.1
 	github.com/coreos/go-systemd/v22 v22.5.0
@@ -97,6 +97,7 @@ require (
 	gopkg.in/validator.v2 v2.0.1
 	gopkg.in/yaml.v3 v3.0.1
 	storj.io/uplink v1.13.1
+
 )
 
 require (
