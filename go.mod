@@ -12,6 +12,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azfile v1.3.0
 	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358
 	github.com/Files-com/files-sdk-go/v3 v3.2.48
+	github.com/IBM/go-sdk-core/v5 v5.18.5
 	github.com/Max-Sum/base32768 v0.0.0-20230304063302-18e6ce5945fd
 	github.com/a8m/tree v0.0.0-20240104212747-2c8764a5f17e
 	github.com/aalpar/deheap v0.0.0-20210914013432-0cc84d79dec3
@@ -124,6 +125,7 @@ require (
 	github.com/antchfx/xpath v1.3.1 // indirect
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/appscode/go-querystring v0.0.0-20170504095604-0126cfb3f1dc // indirect
+	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.4 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.13 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.17 // indirect
@@ -169,7 +171,9 @@ require (
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/go-openapi/errors v0.21.0 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
+	github.com/go-openapi/strfmt v0.22.1 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
@@ -224,11 +228,12 @@ require (
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/xxml v0.0.3 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/onsi/ginkgo v1.16.5 // indirect
+	github.com/oklog/ulid v1.3.1 // indirect
 	github.com/panjf2000/ants/v2 v2.10.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.3 // indirect
 	github.com/pengsrc/go-shared v0.2.1-0.20190131101655-1999055a4a14 // indirect
@@ -264,6 +269,7 @@ require (
 	github.com/yosssi/ace v0.0.5 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zeebo/errs v1.3.0 // indirect
+	go.mongodb.org/mongo-driver v1.14.0 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.55.0 // indirect
 	go.opentelemetry.io/otel v1.30.0 // indirect
