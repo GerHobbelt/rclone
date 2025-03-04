@@ -87,12 +87,12 @@ require (
 	github.com/zeebo/blake3 v0.2.4
 	go.etcd.io/bbolt v1.4.0
 	goftp.io/server/v2 v2.0.1
-	golang.org/x/crypto v0.32.0
-	golang.org/x/net v0.34.0
+	golang.org/x/crypto v0.33.0
+	golang.org/x/net v0.35.0
 	golang.org/x/oauth2 v0.23.0
-	golang.org/x/sync v0.10.0
-	golang.org/x/sys v0.29.0
-	golang.org/x/text v0.21.0
+	golang.org/x/sync v0.11.0
+	golang.org/x/sys v0.30.0
+	golang.org/x/text v0.22.0
 	golang.org/x/time v0.6.0
 	google.golang.org/api v0.197.0
 	gopkg.in/validator.v2 v2.0.1
@@ -149,14 +149,15 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/chilts/sid v0.0.0-20190607042430-660e94789ec9 // indirect
 	github.com/cloudflare/circl v1.4.0 // indirect
+	github.com/cloudsoda/sddl v0.0.0-20250224235906-926454e91efc // indirect
 	github.com/cloudwego/base64x v0.1.4 // indirect
 	github.com/cloudwego/iasm v0.2.0 // indirect
-	github.com/cpuguy83/go-md2man/v2 v2.0.4 // indirect
+	github.com/cpuguy83/go-md2man/v2 v2.0.6 // indirect
 	github.com/creasty/defaults v1.7.0 // indirect
 	github.com/cronokirby/saferith v0.33.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/ebitengine/purego v0.8.1 // indirect
+	github.com/ebitengine/purego v0.8.2 // indirect
 	github.com/emersion/go-message v0.18.1 // indirect
 	github.com/emersion/go-vcard v0.0.0-20230815062825-8fda7d206ec9 // indirect
 	github.com/fatih/structs v1.1.0 // indirect
@@ -179,7 +180,7 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.22.1 // indirect
 	github.com/go-resty/resty/v2 v2.15.0 // indirect
-	github.com/goccy/go-json v0.10.4 // indirect
+	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/gofrs/flock v0.12.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.2.1 // indirect
@@ -226,6 +227,7 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
+	github.com/minio/crc64nvme v1.0.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/xxml v0.0.3 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
@@ -277,7 +279,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.30.0 // indirect
 	golang.org/x/arch v0.10.0 // indirect
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 // indirect
-	golang.org/x/tools v0.25.0 // indirect
+	golang.org/x/tools v0.26.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/grpc v1.66.2 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
@@ -298,5 +300,5 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/pkg/xattr v0.4.10
 	golang.org/x/mobile v0.0.0-20240909163608-642950227fb3
-	golang.org/x/term v0.28.0
+	golang.org/x/term v0.29.0
 )
