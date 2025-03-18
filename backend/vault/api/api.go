@@ -71,7 +71,7 @@ type API struct {
 	// VersionSupported by this implementation. This is should checked before
 	// any other operation.
 	VersionSupported string
-
+	// An rclone helper rest client wrapper.
 	client    *rest.Client
 	loginPath string
 	timeout   time.Duration
@@ -96,7 +96,7 @@ func New(endpoint, username, password string) *API {
 }
 
 // Version returns the API version supported by the endpoint, transmitted in an
-// HTTP header.
+// HTTP header. It returns an empty string, if version could not be determined.
 func (api *API) Version(ctx context.Context) string {
 	opts := rest.Opts{
 		Method: "GET",
@@ -205,7 +205,7 @@ func (api *API) Login() (err error) {
 
 // Logout drops the session.
 func (api *API) Logout() {
-	api.client.SetHeader("Cookie", "")
+	_ = api.client.SetHeader("Cookie", "")
 }
 
 // Call exposes the current client to the outside, so the caller can reuse
@@ -282,7 +282,7 @@ func (api *API) ResolvePath(p string) (*TreeNode, error) {
 		}
 		t, segments = ts[0], segments[1:]
 	}
-	fs.Debugf(api, "resolve path to treenode: %v => %v", p, t.ID)
+	fs.Debugf(api, "resolved path to treenode: %v => %v", p, t.ID)
 	return t, nil
 }
 
