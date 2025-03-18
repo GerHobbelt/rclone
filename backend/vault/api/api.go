@@ -15,6 +15,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -591,6 +592,256 @@ func (api *API) root() (*TreeNode, error) {
 	}
 	api.cache.SetGroup("root", "default", t)
 	return t, nil
+}
+
+//
+// Transition back to manual API, porting the v2 deposit code (wip)
+// ================================================================
+
+// One and only one of `parent_node_id` and `collection_id` must be supplied.
+type RegisterDepositV2Request struct {
+	// CollectionId id of Collection serving as the root of the new Deposit. Must be owned by the requesting User's Organization
+	CollectionId *int `json:"collection_id,omitempty"`
+
+	// ParentNodeId id of TreeNode to root the new Deposit. TreeNode must be owned by requesting User's Organization. TreeNode must be of type COLLECTION or FOLDER
+	ParentNodeId *int `json:"parent_node_id,omitempty"`
+}
+
+// TerminateDepositRequest defines model for TerminateDepositRequest.
+type TerminateDepositRequest struct {
+	// DepositId ID of target `Deposit`
+	DepositId int `json:"depositId"`
+}
+
+// FinalizeDepositRequest defines model for FinalizeDepositRequest.
+type FinalizeDepositRequest struct {
+	// DepositId ID of target `Deposit`
+	DepositId int `json:"depositId"`
+}
+
+// SendChunkResponse represents the parsed response from SendChunkWithBody
+type SendChunkResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r SendChunkResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SendChunkResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// TerminateDepositResponse represents the parsed response from TerminateDeposit
+type TerminateDepositResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r TerminateDepositResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r TerminateDepositResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// FinalizeDepositResponse represents the parsed response from FinalizeDepositWithResponse
+type FinalizeDepositResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r FinalizeDepositResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FinalizeDepositResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// RegisterDepositResponse represents the parsed response from RegisterDepositWithResponse
+type RegisterDepositV2Response struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RegisterDepositV2Response
+}
+
+// Status returns HTTPResponse.Status
+func (r RegisterDepositV2Response) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RegisterDepositV2Response) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// SendChunkWithBody sends a chunk of data to a deposit and returns the parsed response.
+func (api *API) SendChunkWithBody(ctx context.Context, contentType string, body io.Reader) (*SendChunkResponse, error) {
+	opts := rest.Opts{
+		Method:      "POST",
+		Path:        "/api/deposits/v2/chunk",
+		ContentType: contentType,
+		Body:        body,
+		ExtraHeaders: map[string]string{
+			"X-CSRFTOKEN": api.csrfToken(ctx),
+			"Referer":     api.refererURL("deposits"),
+		},
+	}
+
+	fs.Debugf(api, "sending chunk to deposit")
+	resp, err := api.client.Call(ctx, &opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the response
+	bodyBytes, err := io.ReadAll(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	return &SendChunkResponse{
+		Body:         bodyBytes,
+		HTTPResponse: resp,
+	}, nil
+}
+
+// TerminateDeposit terminates a deposit that is in progress and returns the parsed response.
+func (api *API) TerminateDeposit(ctx context.Context, body TerminateDepositRequest) (*TerminateDepositResponse, error) {
+	opts := rest.Opts{
+		Method:      "POST",
+		Path:        "/api/deposits/v2/terminate",
+		ContentType: "application/json",
+		ExtraHeaders: map[string]string{
+			"X-CSRFTOKEN": api.csrfToken(ctx),
+			"Referer":     api.refererURL("deposits"),
+		},
+	}
+
+	fs.Debugf(api, "terminating deposit: %d", body.DepositId)
+	resp, err := api.client.CallJSON(ctx, &opts, body, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the response
+	bodyBytes, err := io.ReadAll(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	return &TerminateDepositResponse{
+		Body:         bodyBytes,
+		HTTPResponse: resp,
+	}, nil
+}
+
+// FinalizeDepositWithResponse finalizes a deposit and returns the parsed response.
+func (api *API) FinalizeDepositWithResponse(ctx context.Context, body FinalizeDepositRequest) (*FinalizeDepositResponse, error) {
+	opts := rest.Opts{
+		Method:      "POST",
+		Path:        "/api/deposits/v2/finalize",
+		ContentType: "application/json",
+		ExtraHeaders: map[string]string{
+			"X-CSRFTOKEN": api.csrfToken(ctx),
+			"Referer":     api.refererURL("deposits"),
+		},
+	}
+
+	fs.Debugf(api, "finalizing deposit: %d", body.DepositId)
+	resp, err := api.client.CallJSON(ctx, &opts, body, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the response
+	bodyBytes, err := io.ReadAll(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	return &FinalizeDepositResponse{
+		Body:         bodyBytes,
+		HTTPResponse: resp,
+	}, nil
+}
+
+// RegisterDepositV2WithResponse sends a deposit registration request and returns the parsed response.
+func (api *API) RegisterDepositV2WithResponse(ctx context.Context, body RegisterDepositV2Request) (*RegisterDepositV2Response, error) {
+	opts := rest.Opts{
+		Method:      "POST",
+		Path:        "/api/deposits/v2/register",
+		ContentType: "application/json",
+		ExtraHeaders: map[string]string{
+			"X-CSRFTOKEN": api.csrfToken(ctx),
+			"Referer":     api.refererURL("deposits"),
+		},
+	}
+
+	fs.Debugf(api, "registering deposit")
+	resp, err := api.client.CallJSON(ctx, &opts, body, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the response
+	bodyBytes, err := io.ReadAll(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RegisterDepositV2Response{
+		Body:         bodyBytes,
+		HTTPResponse: resp,
+	}
+
+	// If successful response with JSON content, parse it
+	if strings.Contains(resp.Header.Get("Content-Type"), "json") && resp.StatusCode == 200 {
+		var dest RegisterDepositV2Response
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+	}
+
+	return response, nil
 }
 
 // TODO(martin): do two, then pass on
