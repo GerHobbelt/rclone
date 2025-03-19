@@ -80,17 +80,17 @@ named "rclone" already in the folder where you are performing the download
 
 After download with `curl` or `wget` the file needs to be made executable with [chmod](https://man7.org/linux/man-pages/man1/chmod.1.html).
 
-#### Intel-based Macs
-
-```shell
-$ curl --output rclone -L https://github.com/internetarchive/rclone/releases/download/v1.69.1-vault-20250311175157-7be91673a/rclone_Darwin_x86_64
-$ chmod +x rclone
-```
-
 #### Apple Silicon Macs
 
 ```shell
 $ curl --output rclone -L https://github.com/internetarchive/rclone/releases/download/v1.69.1-vault-20250311175157-7be91673a/rclone_Darwin_arm64
+$ chmod +x rclone
+```
+
+#### Intel-based Macs
+
+```shell
+$ curl --output rclone -L https://github.com/internetarchive/rclone/releases/download/v1.69.1-vault-20250311175157-7be91673a/rclone_Darwin_x86_64
 $ chmod +x rclone
 ```
 

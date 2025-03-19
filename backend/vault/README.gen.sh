@@ -152,17 +152,17 @@ named "rclone" already in the folder where you are performing the download
 
 After download with `curl` or `wget` the file needs to be made executable with [chmod](https://man7.org/linux/man-pages/man1/chmod.1.html).
 
-#### Intel-based Macs
-
-```shell
-$ curl --output rclone -L RELEASE_ASSET_DARWIN_INTEL
-$ chmod +x rclone
-```
-
 #### Apple Silicon Macs
 
 ```shell
 $ curl --output rclone -L RELEASE_ASSET_DARWIN_ARM
+$ chmod +x rclone
+```
+
+#### Intel-based Macs
+
+```shell
+$ curl --output rclone -L RELEASE_ASSET_DARWIN_INTEL
 $ chmod +x rclone
 ```
 
