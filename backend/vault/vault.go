@@ -90,7 +90,7 @@ func init() {
 			{
 				Name:    "endpoint",
 				Help:    "Vault API endpoint URL",
-				Default: "http://127.0.0.1:8000/api",
+				Default: "https://vault.archive-it.org/api",
 			},
 			{
 				Name:     "chunk_size",
