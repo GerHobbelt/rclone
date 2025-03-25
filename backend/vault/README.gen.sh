@@ -250,7 +250,7 @@ You can configure your Vault username, password and API endpoint using the
 your credentials):
 
 ```
-$ rclone config create vault vault username=alice password=secret endpoint=https://vault.archive-it.org/api
+$ rclone config create vault vault username='alice' password='secret' endpoint=https://vault.archive-it.org/api
 ```
 
 This will create a configuration file (or extend it, if if already existed) -
