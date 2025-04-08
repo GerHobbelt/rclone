@@ -125,6 +125,24 @@ func TestRegisterDeposit(t *testing.T) {
 	t.Skip("obsolete")
 }
 
+func TestGetFlowIdentifier(t *testing.T) {
+	fs := &Fs{root: "/"}
+	src := &Object{
+		fs:     fs,
+		remote: "r",
+		treeNode: &api.TreeNode{
+			Comment: "dummy treenode",
+		},
+	}
+	v, err := fs.getFlowIdentifier(src)
+	if err != nil {
+		t.Errorf("failed to get flow identifier: %v", err)
+	}
+	if want := "rclone-vault-flow-84a91929c5ae7f4e7a4c33c1b98454f2"; v != want {
+		t.Errorf("getFlowIdentifier: got %v, want %v", v, want)
+	}
+}
+
 func TestDeposit(t *testing.T)      {}
 func TestFileRename(t *testing.T)   {}
 func TestFileMove(t *testing.T)     {}

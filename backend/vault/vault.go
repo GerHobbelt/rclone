@@ -226,7 +226,7 @@ type Fs struct {
 	// On a first put, we register a deposit to get a deposit id. Any
 	// subsequent upload will be associated with that deposit id. On shutdown,
 	// we send a finalize signal.
-	depositsV2Client  *ClientWithResponses // v2 deposits API
+	depositsV2Client  *ClientWithResponses // v2 deposits API; TODO: get rid of this
 	mu                sync.Mutex           // locks inflightDepositID
 	inflightDepositID int                  // inflight deposit id, empty if none inflight
 	started           time.Time            // registration time of the deposit
