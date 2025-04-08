@@ -143,6 +143,27 @@ func TestGetFlowIdentifier(t *testing.T) {
 	}
 }
 
+func TestGetTotalChunks(t *testing.T) {
+	var cases = []struct {
+		about      string
+		objectSize int
+		chunkSize  int64
+		expected   int
+	}{
+		{"zero size and chunk, we need at least one chunk for transmission", 0, 0, 1},
+		{"zero size, we need at least one chunk for transmission, even if the file is size zero", 0, 9, 1},
+		{"single chunk", 1, 1, 1},
+		{"many chunks", 9, 1, 9},
+		{"small object", 8, 9, 1},
+	}
+	for _, c := range cases {
+		result := getFlowTotalChunks(c.objectSize, c.chunkSize)
+		if result != c.expected {
+			t.Errorf("getFlowTotalChunks [%s]: got %v, want %v", c.about, result, c.expected)
+		}
+	}
+}
+
 func TestDeposit(t *testing.T)      {}
 func TestFileRename(t *testing.T)   {}
 func TestFileMove(t *testing.T)     {}
