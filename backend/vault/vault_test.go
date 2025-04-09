@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/rclone/rclone/backend/vault/api"
-	"github.com/rclone/rclone/backend/vault/oapi"
 	"github.com/rclone/rclone/fstest/fstests"
 )
 
@@ -50,8 +49,8 @@ func randomName(tag string) string {
 }
 
 // mustLogin returns an authenticated client.
-func mustLogin(t *testing.T) *oapi.CompatAPI {
-	api, err := oapi.New(testEndpoint, testUsername, testPassword)
+func mustLogin(t *testing.T) *api.API {
+	api, err := api.New(testEndpoint, testUsername, testPassword)
 	if err != nil {
 		t.Fatalf("login failed: %v", err)
 	}
@@ -62,7 +61,7 @@ func mustLogin(t *testing.T) *oapi.CompatAPI {
 }
 
 // mustCollection creates and returns a collection with a given name.
-func mustCollection(t *testing.T, api *oapi.CompatAPI, name string) *api.Collection {
+func mustCollection(t *testing.T, api *api.API, name string) *api.Collection {
 	ctx := context.Background()
 	err := api.CreateCollection(ctx, name)
 	if err != nil {
@@ -81,7 +80,7 @@ func mustCollection(t *testing.T, api *oapi.CompatAPI, name string) *api.Collect
 	return result[0]
 }
 
-func mustTreeNodeForCollection(t *testing.T, api *oapi.CompatAPI, c *api.Collection) *api.TreeNode {
+func mustTreeNodeForCollection(t *testing.T, api *api.API, c *api.Collection) *api.TreeNode {
 	vs := url.Values{}
 	vs.Set("id", fmt.Sprintf("%d", c.TreeNodeIdentifier()))
 	t.Logf("finding treenode: %v", c.TreeNodeIdentifier())
