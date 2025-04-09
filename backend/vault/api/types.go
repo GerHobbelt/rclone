@@ -188,10 +188,17 @@ func (stats *CollectionStats) NumFiles() (result int64) {
 	return
 }
 
+type Doer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
 // Content either returns the real content or some dummy bytes of the size of
 // the object. TODO: handle options; TODO: add download domain
-func (t *TreeNode) Content(client *http.Client, host string, options ...fs.OpenOption) (io.ReadCloser, error) {
+func (t *TreeNode) Content(client *rest.Client, host string, options ...fs.OpenOption) (io.ReadCloser, error) {
 	switch v := t.ContentURL.(type) {
+	case nil:
+		r := &iotemp.DummyReader{N: t.Size(), C: 0x7c}
+		return io.NopCloser(r), nil
 	case string:
 		// The DEVNULL backend currently returns a string like
 		// "/download/109?storage_backend=DEVNULL", so we are treating that
@@ -199,58 +206,21 @@ func (t *TreeNode) Content(client *http.Client, host string, options ...fs.OpenO
 		if strings.Contains(v, "storage_backend=DEVNULL") {
 			r := &iotemp.DummyReader{N: t.Size(), C: 0x7c}
 			return io.NopCloser(r), nil
-		} else {
-			w := host + v
-			switch {
-			case strings.Contains(host, "127.0.0.1"):
-				fs.Debugf(t.ID, "using a different resolution method for local env")
-				fs.Debugf(t.ID, "attempting to download (local): %v\n", w)
-				req, err := http.NewRequest("GET", w, nil)
-				if err != nil {
-					return nil, err
-				}
-				resp, err := client.Do(req)
-				if err != nil {
-					return nil, err
-				}
-				if resp.StatusCode >= 400 {
-					return nil, fmt.Errorf("open: %v", resp.StatusCode)
-				}
-				redirectURL := resp.Header.Get("X-Accel-Redirect")
-				redirectURL = strings.Replace(redirectURL, "/proxy_remote/http/", "http://", 1)
-				redirectURL = strings.Replace(redirectURL, "minio:9000", "127.0.0.1:9000", 1)
-				fs.Debugf(t.ID, "resolved local URL to: %v", redirectURL)
-				req, err = http.NewRequest("GET", redirectURL, nil)
-				if err != nil {
-					return nil, err
-				}
-				resp, err = client.Do(req)
-				if err != nil {
-					return nil, err
-				}
-				if resp.StatusCode >= 400 {
-					return nil, fmt.Errorf("open: %v", resp.StatusCode)
-				}
-				return resp.Body, nil
-			default:
-				fs.Debugf(t.ID, "attempting to download: %v\n", w)
-				req, err := http.NewRequest("GET", w, nil)
-				if err != nil {
-					return nil, err
-				}
-				resp, err := client.Do(req)
-				if err != nil {
-					return nil, err
-				}
-				if resp.StatusCode >= 400 {
-					return nil, fmt.Errorf("open: %v", resp.StatusCode)
-				}
-				return resp.Body, nil
-			}
 		}
-	case nil:
-		r := &iotemp.DummyReader{N: t.Size(), C: 0x7c}
-		return io.NopCloser(r), nil
+		w := host + v
+		fs.Debugf(t.ID, "attempting to download: %v\n", w)
+		opts := &rest.Opts{
+			Method:  "GET",
+			RootURL: w,
+		}
+		resp, err := client.Call(context.TODO(), opts)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("open: %v", resp.StatusCode)
+		}
+		return resp.Body, nil
 	default:
 		return nil, fmt.Errorf("invalid content url type: %T", v)
 	}
@@ -694,6 +664,10 @@ func (api *API) FindTreeNodes(vs url.Values) (result []*TreeNode, err error) {
 			Method:     "GET",
 			Path:       "/treenodes/",
 			Parameters: vs,
+			ExtraHeaders: map[string]string{
+				"X-CSRFTOKEN": api.csrfToken(context.Background()),
+				"Referer":     api.refererURL("treenodes"),
+			},
 		}
 		doc TreeNodeList
 	)

@@ -22,7 +22,6 @@ import (
 
 	"github.com/rclone/rclone/backend/vault/api"
 	"github.com/rclone/rclone/backend/vault/iotemp"
-	"github.com/rclone/rclone/backend/vault/oapi"
 	"github.com/rclone/rclone/backend/vault/retry"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -143,34 +142,20 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err != nil {
 		return nil, err
 	}
-	api, err := oapi.New(opt.EndpointNormalized(), opt.Username, opt.Password)
-	if err != nil {
+	// classic API will be the only one
+	classicApi := api.New(opt.EndpointNormalized(), opt.Username, opt.Password)
+	if err := classicApi.Login(); err != nil {
 		return nil, err
 	}
-	if err := api.Login(); err != nil {
-		return nil, err
-	}
-	if v := api.Version(ctx); v != "" && v != api.VersionSupported {
-		fmt.Fprintf(os.Stderr, VersionMismatchMessage, api.Version(ctx), api.VersionSupported)
+	if v := classicApi.Version(ctx); v != "" && v != classicApi.VersionSupported {
+		fmt.Fprintf(os.Stderr, VersionMismatchMessage, classicApi.Version(ctx), classicApi.VersionSupported)
 		return nil, ErrVersionMismatch
 	}
-	// V2 is the current deposit API: /api/deposits/v2/
-	var depositsV2Client *ClientWithResponses
-	endpoint, err := opt.EndpointNormalizedDepositsV2()
-	if err != nil {
-		return nil, err
-	}
-	depositsV2Client, err = NewClientWithResponses(endpoint,
-		WithHTTPClient(api.Client()))
-	if err != nil {
-		return nil, err
-	}
 	f := &Fs{
-		name:             name,
-		root:             root,
-		opt:              opt,
-		api:              api,
-		depositsV2Client: depositsV2Client, // TODO: remove this doubling of API and then another client for the deposit
+		name:       name,
+		root:       root,
+		opt:        opt,
+		classicApi: classicApi,
 	}
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
@@ -218,18 +203,17 @@ func (opt Options) EndpointNormalizedDepositsV2() (string, error) {
 // Fs is the main Vault filesystem. Most operations are accessed through the
 // api.
 type Fs struct {
-	name     string
-	root     string
-	opt      Options         // vault options
-	api      *oapi.CompatAPI // compat api, wrapper around oapi, exposing legacy methods; TODO: get rid of this
-	features *fs.Features    // optional features
+	name       string
+	root       string
+	opt        Options      // vault options
+	classicApi *api.API     // TODO: go back to only this api
+	features   *fs.Features // optional features
 	// On a first put, we register a deposit to get a deposit id. Any
 	// subsequent upload will be associated with that deposit id. On shutdown,
 	// we send a finalize signal.
-	depositsV2Client  *ClientWithResponses // v2 deposits API; TODO: get rid of this
-	mu                sync.Mutex           // locks inflightDepositID
-	inflightDepositID int                  // inflight deposit id, empty if none inflight
-	started           time.Time            // registration time of the deposit
+	mu                sync.Mutex // locks inflightDepositID
+	inflightDepositID int        // inflight deposit id, empty if none inflight
+	started           time.Time  // registration time of the deposit
 	atexit            atexit.FnHandle
 }
 
@@ -274,7 +258,7 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 		entries fs.DirEntries
 		absPath = f.absPath(dir)
 	)
-	t, err := f.api.ResolvePath(absPath)
+	t, err := f.classicApi.ResolvePath(absPath)
 	if err != nil {
 		if err == fs.ErrorObjectNotFound {
 			return nil, fs.ErrorDirNotFound
@@ -290,7 +274,7 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 		}
 		entries = append(entries, obj)
 	case t.NodeType == "ORGANIZATION" || t.NodeType == "COLLECTION" || t.NodeType == "FOLDER":
-		nodes, err := f.api.List(t)
+		nodes, err := f.classicApi.List(t)
 		if err != nil {
 			return nil, err
 		}
@@ -329,7 +313,7 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 // otherwise ErrorObjectNotFound.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	fs.Debugf(f, "new object at %v (%v)", remote, f.absPath(remote))
-	t, err := f.api.ResolvePath(f.absPath(remote))
+	t, err := f.classicApi.ResolvePath(f.absPath(remote))
 	if err != nil {
 		return nil, err
 	}
@@ -366,14 +350,14 @@ func (f *Fs) requestDeposit(ctx context.Context) error {
 	// the directory and the object will be the file.
 	//
 	// ...
-	t, err := f.api.ResolvePath(f.root)
+	t, err := f.classicApi.ResolvePath(f.root)
 	if err != nil {
 		if err == fs.ErrorObjectNotFound {
 			fs.Debugf(f, "root not found: %v", f.root)
 			if err = f.mkdir(ctx, f.root); err != nil {
 				return err
 			}
-			if t, err = f.api.ResolvePath(f.root); err != nil {
+			if t, err = f.classicApi.ResolvePath(f.root); err != nil {
 				return err
 			}
 		} else {
@@ -383,12 +367,12 @@ func (f *Fs) requestDeposit(ctx context.Context) error {
 	fs.Debugf(f, "root resolved: %s %v %v %T", f.root, t, err, err)
 	var (
 		parent = t
-		body   = VaultDepositApiRegisterDepositJSONRequestBody{}
+		body   = api.RegisterDepositV2Request{}
 	)
 	fs.Debugf(f, "request deposit: parent was %v", parent)
 	switch {
 	case parent.NodeType == "COLLECTION":
-		c, err := f.api.TreeNodeToCollection(parent)
+		c, err := f.classicApi.TreeNodeToCollection(parent)
 		if err != nil {
 			return fmt.Errorf("failed to resolve treenode to collection: %w", err)
 		}
@@ -402,17 +386,21 @@ func (f *Fs) requestDeposit(ctx context.Context) error {
 		fs.Debugf(f, "cannot copy to parent: %v", parent)
 		return ErrCannotCopyToRoot
 	}
-	resp, err := f.depositsV2Client.VaultDepositApiRegisterDepositWithResponse(ctx, body)
+	// XXX: BTC
+	rdresp, err := f.classicApi.RegisterDepositV2WithResponse(ctx, body)
 	if err != nil {
+		fs.Debugf(f, "classic api register deposit failed: %v (body: %v)", err, body)
 		return err
+	} else {
+		fs.Debugf(f, "classic api register succeeded: %#v", rdresp.JSON200.DepositID)
 	}
-	if resp.StatusCode() != 200 {
-		return fmt.Errorf("deposits/v2 registration failed with: %s", resp.HTTPResponse.Status)
+	if rdresp.StatusCode() != 200 {
+		return fmt.Errorf("deposits/v2 registration failed with: %s", rdresp.HTTPResponse.Status)
 	}
-	if resp.JSON200.DepositId == 0 {
+	if rdresp.JSON200.DepositID == 0 {
 		return ErrMissingDepositIdentifier
 	}
-	f.inflightDepositID = resp.JSON200.DepositId
+	f.inflightDepositID = rdresp.JSON200.DepositID
 	f.started = time.Now()
 	fs.Debugf(f, "successfully registered deposit: %v", f.inflightDepositID)
 	return nil
@@ -640,7 +628,7 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 		backoff := retry.WithCappedDuration(UploadChunkBackoffCap, retry.NewFibonacci(UploadChunkBackoffBase))
 		err = retry.Do(ctx, backoff, func(ctx context.Context) error {
 			fs.Debugf(f, "starting upload... (buffer size: %v, [T=%v])", wbuf.Len(), time.Since(f.started))
-			resp, err = f.depositsV2Client.VaultDepositApiSendChunkWithBody(ctx, w.FormDataContentType(), &wbuf)
+			resp, err = f.classicApi.SendChunkWithBody(ctx, w.FormDataContentType(), &wbuf)
 			switch {
 			case err != nil:
 				// This may be cause by infrastructure errors, like DNS
@@ -688,14 +676,14 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 // the absolute path. Will create parent directories if necessary.
 func (f *Fs) mkdir(ctx context.Context, dir string) error {
 	fs.Debugf(f, "mkdir: %v", dir)
-	var t, _ = f.api.ResolvePath(dir)
+	var t, _ = f.classicApi.ResolvePath(dir)
 	switch {
 	case t != nil && (t.NodeType == "FOLDER" || t.NodeType == "COLLECTION"):
 		return nil
 	case t != nil:
 		return fmt.Errorf("path already exists: %v [%s]", dir, t.NodeType)
 	case f.root == "/" || strings.Count(dir, "/") == 1:
-		return f.api.CreateCollection(ctx, path.Base(dir))
+		return f.classicApi.CreateCollection(ctx, path.Base(dir))
 	default:
 		segments := pathSegments(dir, "/")
 		if len(segments) == 0 {
@@ -708,21 +696,21 @@ func (f *Fs) mkdir(ctx context.Context, dir string) error {
 		for i, s := range segments {
 			fs.Debugf(f, "mkdir: %v %v %v", i, s, parent)
 			current = path.Join(current, s)
-			t, _ := f.api.ResolvePath(current)
+			t, _ := f.classicApi.ResolvePath(current)
 			switch {
 			case t != nil:
 				parent = t
 				continue
 			case t == nil && i == 0:
-				if err := f.api.CreateCollection(ctx, s); err != nil {
+				if err := f.classicApi.CreateCollection(ctx, s); err != nil {
 					return err
 				}
 			default:
-				if err := f.api.CreateFolder(ctx, parent, s); err != nil {
+				if err := f.classicApi.CreateFolder(ctx, parent, s); err != nil {
 					return err
 				}
 			}
-			t, err := f.api.ResolvePath(current)
+			t, err := f.classicApi.ResolvePath(current)
 			if err != nil {
 				return err
 			}
@@ -735,12 +723,12 @@ func (f *Fs) mkdir(ctx context.Context, dir string) error {
 // Rmdir deletes a folder. Collections cannot be removed.
 func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	fs.Debugf(f, "rmdir %v", f.absPath(dir))
-	t, err := f.api.ResolvePath(f.absPath(dir))
+	t, err := f.classicApi.ResolvePath(f.absPath(dir))
 	if err != nil {
 		return err
 	}
 	if t.NodeType == "FOLDER" || t.NodeType == "COLLECTION" {
-		return f.api.Remove(ctx, t)
+		return f.classicApi.Remove(ctx, t)
 	}
 	return fmt.Errorf("cannot delete node type %v", strings.ToLower(t.NodeType))
 }
@@ -750,14 +738,14 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 
 // PublicLink returns the download link, if it exists.
 func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (link string, err error) {
-	t, err := f.api.ResolvePath(f.absPath(remote))
+	t, err := f.classicApi.ResolvePath(f.absPath(remote))
 	if err != nil {
 		return "", err
 	}
 	switch v := t.ContentURL.(type) {
 	case string:
 		// TODO: check, if host + URL will resolve downloads correctly
-		host := strings.Replace(f.api.Endpoint, "/api", "", 1)
+		host := strings.Replace(f.classicApi.Endpoint, "/api", "", 1)
 		v = host + v
 		u, err := url.Parse(v)
 		if err != nil {
@@ -771,11 +759,11 @@ func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, 
 
 // About returns currently only the quota.
 func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
-	organization, err := f.api.Organization()
+	organization, err := f.classicApi.Organization()
 	if err != nil {
 		return nil, fmt.Errorf("api organization failed: %w", err)
 	}
-	stats, err := f.api.GetCollectionStats()
+	stats, err := f.classicApi.GetCollectionStats()
 	if err != nil {
 		return nil, fmt.Errorf("api collection failed: %w", err)
 	}
@@ -794,11 +782,11 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 
 // UserInfo returns some information about the user, organization and plan.
 func (f *Fs) UserInfo(ctx context.Context) (map[string]string, error) {
-	u, err := f.api.User()
+	u, err := f.classicApi.User()
 	if err != nil {
 		return nil, err
 	}
-	organization, err := f.api.Organization()
+	organization, err := f.classicApi.Organization()
 	if err != nil {
 		return nil, err
 	}
@@ -815,43 +803,43 @@ func (f *Fs) UserInfo(ctx context.Context) (map[string]string, error) {
 // Disconnect logs out the current user.
 func (f *Fs) Disconnect(ctx context.Context) error {
 	fs.Debugf(f, "disconnect")
-	f.api.Logout()
+	f.classicApi.Logout()
 	return nil
 }
 
 // DirMove implements server side renames and moves.
 func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string) error {
 	fs.Debugf(f, "dir move: %v [%v] => %v", src.Root(), srcRemote, f.root)
-	srcNode, err := f.api.ResolvePath(src.Root())
+	srcNode, err := f.classicApi.ResolvePath(src.Root())
 	if err != nil {
 		return err
 	}
 	srcDirParent := path.Dir(src.Root())
-	srcDirParentNode, err := f.api.ResolvePath(srcDirParent)
+	srcDirParentNode, err := f.classicApi.ResolvePath(srcDirParent)
 	if err != nil {
 		return err
 	}
 	dstDirParent := path.Dir(f.root)
-	dstDirParentNode, err := f.api.ResolvePath(dstDirParent)
+	dstDirParentNode, err := f.classicApi.ResolvePath(dstDirParent)
 	if err != nil {
 		return err
 	}
 	if srcDirParentNode.ID == dstDirParentNode.ID {
 		fs.Debugf(f, "move is a rename")
-		t, err := f.api.ResolvePath(src.Root())
+		t, err := f.classicApi.ResolvePath(src.Root())
 		if err != nil {
 			return err
 		}
-		return f.api.Rename(ctx, t, path.Base(f.root))
+		return f.classicApi.Rename(ctx, t, path.Base(f.root))
 	} else {
 		switch {
 		case srcNode.NodeType == "FILE":
 			// If f.root exists and is a directory, we can move the file in
 			// there; if f.root does not exists, we treat the parent as the dir
 			// and the base as the file to copy to.
-			rootNode, err := f.api.ResolvePath(f.root)
+			rootNode, err := f.classicApi.ResolvePath(f.root)
 			if err == nil {
-				if err := f.api.Move(ctx, srcNode, rootNode); err != nil {
+				if err := f.classicApi.Move(ctx, srcNode, rootNode); err != nil {
 					return err
 				}
 			} else {
@@ -859,24 +847,24 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 				if err := f.mkdir(ctx, dstDir); err != nil {
 					return err
 				}
-				dstDirNode, err := f.api.ResolvePath(dstDir)
+				dstDirNode, err := f.classicApi.ResolvePath(dstDir)
 				if err != nil {
 					return err
 				}
-				if err := f.api.Move(ctx, srcNode, dstDirNode); err != nil {
+				if err := f.classicApi.Move(ctx, srcNode, dstDirNode); err != nil {
 					return err
 				}
 				if path.Base(f.root) != path.Base(src.Root()) {
-					return f.api.Rename(ctx, srcNode, path.Base(f.root))
+					return f.classicApi.Rename(ctx, srcNode, path.Base(f.root))
 				}
 			}
 		case srcNode.NodeType == "FOLDER" || srcNode.NodeType == "COLLECTION":
 			fs.Debugf(f, "moving dir to %v", f.root)
-			p, err := f.api.ResolvePath(f.root)
+			p, err := f.classicApi.ResolvePath(f.root)
 			if err != nil {
 				return err
 			}
-			return f.api.Move(ctx, srcNode, p)
+			return f.classicApi.Move(ctx, srcNode, p)
 		}
 	}
 	return nil
@@ -884,14 +872,14 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 
 // Purge remove a folder.
 func (f *Fs) Purge(ctx context.Context, dir string) error {
-	t, err := f.api.ResolvePath(f.absPath(dir))
+	t, err := f.classicApi.ResolvePath(f.absPath(dir))
 	if err != nil {
 		return err
 	}
 	if t.NodeType != "FOLDER" {
 		return fmt.Errorf("can only purge folders, not %v", t.NodeType)
 	}
-	return f.api.Remove(ctx, t)
+	return f.classicApi.Remove(ctx, t)
 }
 
 func (f *Fs) Shutdown(ctx context.Context) error {
@@ -905,15 +893,16 @@ func (f *Fs) Terminate() {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	body := TerminateDepositRequest{
+	body := api.TerminateDepositRequest{
 		DepositId: f.inflightDepositID,
 	}
 	ctx := context.Background()
-	resp, err := f.depositsV2Client.VaultDepositApiTerminateDeposit(ctx, body)
+	resp, err := f.classicApi.TerminateDeposit(ctx, body)
 	if err != nil {
 		fs.LogLevelPrintf(fs.LogLevelWarning, f, "terminate deposit failed: %v", err)
 		return
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		fs.LogLevelPrintf(fs.LogLevelWarning, f, "terminate deposit failed: %v", resp.StatusCode)
 		return
@@ -931,21 +920,21 @@ func (f *Fs) finalize(ctx context.Context) error {
 		return nil
 	}
 	fs.Debugf(f, "finalizing deposit %v", f.inflightDepositID)
-	body := VaultDepositApiFinalizeDepositJSONRequestBody{
+	body := api.FinalizeDepositRequest{
 		DepositId: f.inflightDepositID,
 	}
-	resp, err := f.depositsV2Client.VaultDepositApiFinalizeDepositWithResponse(ctx, body)
+	resp, err := f.classicApi.FinalizeDepositWithResponse(ctx, body)
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode() != 200 {
-		fs.Debugf(f, "[finalize] got %v -- response dump follows", resp.StatusCode())
-		b, err := httputil.DumpResponse(resp.HTTPResponse, true)
+	if resp.StatusCode != 200 {
+		fs.Debugf(f, "[finalize] got %v -- response dump follows", resp.StatusCode)
+		b, err := httputil.DumpResponse(resp, true)
 		if err != nil {
 			return err
 		}
 		fs.Debugf(f, string(b))
-		return fmt.Errorf("finalize got: %v", resp.StatusCode())
+		return fmt.Errorf("finalize got: %v", resp.StatusCode)
 	}
 	fs.Debugf(f, "finalize done")
 	f.inflightDepositID = 0
@@ -1064,12 +1053,12 @@ func (o *Object) Storable() bool { return true }
 // SetModTime set the modified at time to the current time.
 func (o *Object) SetModTime(ctx context.Context, _ time.Time) error {
 	fs.Debugf(o, "set mod time (now) for %v", o.ID())
-	return o.fs.api.SetModTime(ctx, o.treeNode)
+	return o.fs.classicApi.SetModTime(ctx, o.treeNode)
 }
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
 	fs.Debugf(o, "reading object contents from %v", o.ID())
-	host := strings.Replace(o.fs.api.Endpoint, "/api", "", 1)
-	return o.treeNode.Content(o.fs.api.Client(), host, options...)
+	host := strings.Replace(o.fs.classicApi.Endpoint, "/api", "", 1)
+	return o.treeNode.Content(o.fs.classicApi.Client(), host, options...)
 }
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	fs.Debugf(o, "updating object contents at %v", o.ID())
@@ -1078,7 +1067,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 }
 func (o *Object) Remove(ctx context.Context) error {
 	fs.Debugf(o, "removing object: %v", o.ID())
-	return o.fs.api.Remove(ctx, o.treeNode)
+	return o.fs.classicApi.Remove(ctx, o.treeNode)
 }
 
 // Object extra
@@ -1135,7 +1124,7 @@ func (dir *Dir) Size() int64 { return 0 }
 
 // Items returns the number of entries in this directory.
 func (dir *Dir) Items() int64 {
-	children, err := dir.fs.api.List(dir.treeNode)
+	children, err := dir.fs.classicApi.List(dir.treeNode)
 	if err != nil {
 		return 0
 	}
