@@ -50,11 +50,8 @@ func randomName(tag string) string {
 
 // mustLogin returns an authenticated client.
 func mustLogin(t *testing.T) *api.API {
-	api, err := api.New(testEndpoint, testUsername, testPassword)
-	if err != nil {
-		t.Fatalf("login failed: %v", err)
-	}
-	if err = api.Login(); err != nil {
+	api := api.New(testEndpoint, testUsername, testPassword)
+	if err := api.Login(); err != nil {
 		t.Fatalf("login failed: %v", err)
 	}
 	return api

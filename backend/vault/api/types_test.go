@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/rclone/rclone/lib/rest"
 )
 
 func TestCollectionStatsTotalSize(t *testing.T) {
@@ -52,7 +54,8 @@ func TestTreeNodeContent(t *testing.T) {
 	tno := &TreeNode{
 		ContentURL: ts.URL,
 	}
-	rc, err := tno.Content(http.DefaultClient, "", nil)
+	client := rest.NewClient(http.DefaultClient)
+	rc, err := tno.Content(client, "", nil)
 	if err != nil {
 		t.Fatalf("could not get content: %v", err)
 	}
