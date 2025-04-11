@@ -135,6 +135,23 @@ For more information about Vault visit https://webservices.archive.org/pages/vau
 	UploadChunkBackoffCap  = 30 * time.Second       // max backoff interval
 )
 
+// Fs is the main Vault filesystem. Most operations are accessed through the
+// api.
+type Fs struct {
+	name     string
+	root     string
+	opt      Options      // vault options
+	api      *api.API     // API wrapper
+	features *fs.Features // optional features
+	// On a first put, we register a deposit to get a deposit id. Any
+	// subsequent upload will be associated with that deposit id. On shutdown,
+	// we send a finalize signal.
+	mu                sync.Mutex // locks inflightDepositID
+	inflightDepositID int        // inflight deposit id, empty if none inflight
+	started           time.Time  // registration time of the deposit
+	atexit            atexit.FnHandle
+}
+
 // NewFS sets up a new filesystem for vault, with deposits/v2 support.
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	var opt Options
@@ -142,7 +159,6 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err != nil {
 		return nil, err
 	}
-	// classic API will be the only one
 	api := api.New(opt.EndpointNormalized(), opt.Username, opt.Password)
 	if err := api.Login(); err != nil {
 		return nil, err
@@ -186,35 +202,6 @@ type Options struct {
 // EndpointNormalized handles trailing slashes.
 func (opt Options) EndpointNormalized() string {
 	return strings.TrimRight(opt.Endpoint, "/")
-}
-
-// EndpointNormalizedDepositsV2 returns the deposits V2 endpoint.
-func (opt Options) EndpointNormalizedDepositsV2() (string, error) {
-	u := opt.EndpointNormalized()
-	if len(u) < 11 { // len("http://a.to")
-		return "", ErrInvalidEndpoint
-	}
-	if strings.HasSuffix(u, "/api") {
-		u = u[:len(u)-4]
-	}
-	return u, nil
-}
-
-// Fs is the main Vault filesystem. Most operations are accessed through the
-// api.
-type Fs struct {
-	name     string
-	root     string
-	opt      Options      // vault options
-	api      *api.API     // TODO: go back to only this api
-	features *fs.Features // optional features
-	// On a first put, we register a deposit to get a deposit id. Any
-	// subsequent upload will be associated with that deposit id. On shutdown,
-	// we send a finalize signal.
-	mu                sync.Mutex // locks inflightDepositID
-	inflightDepositID int        // inflight deposit id, empty if none inflight
-	started           time.Time  // registration time of the deposit
-	atexit            atexit.FnHandle
 }
 
 // Fs Info
