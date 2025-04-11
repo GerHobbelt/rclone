@@ -21,7 +21,8 @@ import (
 // TODO(martin): pagination
 const defaultLimit = "50000"
 
-// Organization represents a single document.
+// Organization represents a single organization, at the top of the object
+// hierarchy.
 type Organization struct {
 	Name       string `json:"name"`
 	Plan       string `json:"plan"`
@@ -44,7 +45,7 @@ type User struct {
 	Username     string `json:"username"`
 }
 
-// Collection payload.
+// Collection payload. A collection is a top level directory.
 type Collection struct {
 	FixityFrequency    string `json:"fixity_frequency"`
 	Name               string `json:"name"`
@@ -58,7 +59,8 @@ type Collection struct {
 	URL               string `json:"url"`       // http://127.0.0.1:8000/api/collections/1/
 }
 
-// TreeNode is node in the filesystem tree.
+// TreeNode is node in the filesystem tree. The FileType determines the actual
+// type (file, folder, collection, organization).
 type TreeNode struct {
 	Comment              interface{} `json:"comment"`
 	ContentURL           interface{} `json:"content_url"`
