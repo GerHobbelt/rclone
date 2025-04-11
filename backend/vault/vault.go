@@ -488,12 +488,13 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		fs:     f,
 		remote: src.Remote(),
 		treeNode: &api.TreeNode{
-			NodeType:   "FILE",
-			ObjectSize: src.Size(),
-			Md5Sum:     sums[hash.MD5],
-			Sha1Sum:    sums[hash.SHA1],
-			Sha256Sum:  sums[hash.SHA256],
-			ModifiedAt: src.ModTime(ctx).Format(time.RFC3339),
+			NodeType:             "FILE",
+			ObjectSize:           src.Size(),
+			Md5Sum:               sums[hash.MD5],
+			Sha1Sum:              sums[hash.SHA1],
+			Sha256Sum:            sums[hash.SHA256],
+			PreDepositModifiedAt: src.ModTime(ctx).Format(time.RFC3339),
+			ModifiedAt:           time.Now().Format(time.RFC3339),
 		},
 	}, nil
 }
