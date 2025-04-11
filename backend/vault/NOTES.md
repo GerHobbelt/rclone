@@ -9,7 +9,7 @@
 * [ ] custom command, vault specific things, like fixity, geolocation, "dashboard", metadata upload, ...
 * [ ] use explicit encoding mapping and spec out the allowed chars for petabox; TestIntegration/FsMkdir/FsEncoding
 * [ ] api keys for auth
- 
+
 ## Overview
 
 For rclone tests, the idea is to have a fully ephemeral, fresh-off-the-source
@@ -185,3 +185,47 @@ I also put in a minor PR for the docs: https://github.com/internetarchive/rclone
 ```
 
 * [https://stackoverflow.com/questions/24782826/the-filename-directory-name-or-volume-label-syntax-is-incorrect-inside-batch](https://stackoverflow.com/questions/24782826/the-filename-directory-name-or-volume-label-syntax-is-incorrect-inside-batch)
+
+## Short Test Results
+
+```
+--- FAIL: TestIntegration (19.17s)
+    --- SKIP: TestIntegration/FsCheckWrap (0.00s)
+    --- SKIP: TestIntegration/FsCommand (0.00s)
+    --- PASS: TestIntegration/FsRmdirNotFound (0.29s)
+    --- PASS: TestIntegration/FsString (0.00s)
+    --- PASS: TestIntegration/FsName (0.00s)
+    --- PASS: TestIntegration/FsRoot (0.00s)
+    --- PASS: TestIntegration/FsRmdirEmpty (0.26s)
+    --- FAIL: TestIntegration/FsMkdir (17.20s)
+        --- PASS: TestIntegration/FsMkdir/FsMkdirRmdirSubdir (4.62s)
+        --- PASS: TestIntegration/FsMkdir/FsListEmpty (0.24s)
+        --- PASS: TestIntegration/FsMkdir/FsListDirEmpty (0.23s)
+        --- SKIP: TestIntegration/FsMkdir/FsListRDirEmpty (0.00s)
+        --- PASS: TestIntegration/FsMkdir/FsListDirNotFound (0.25s)
+        --- SKIP: TestIntegration/FsMkdir/FsListRDirNotFound (0.00s)
+        --- SKIP: TestIntegration/FsMkdir/FsEncoding (0.00s)
+        --- PASS: TestIntegration/FsMkdir/FsNewObjectNotFound (0.47s)
+        --- PASS: TestIntegration/FsMkdir/FsPutError (0.56s)
+        --- FAIL: TestIntegration/FsMkdir/FsPutZeroLength (0.64s)
+        --- SKIP: TestIntegration/FsMkdir/FsOpenWriterAt (0.00s)
+        --- SKIP: TestIntegration/FsMkdir/FsOpenChunkWriter (0.00s)
+        --- SKIP: TestIntegration/FsMkdir/FsChangeNotify (0.00s)
+        --- FAIL: TestIntegration/FsMkdir/FsPutFiles (7.26s)
+        --- SKIP: TestIntegration/FsMkdir/FsPutChunked (0.00s)
+        --- SKIP: TestIntegration/FsMkdir/FsCopyChunked (0.00s)
+        --- FAIL: TestIntegration/FsMkdir/FsUploadUnknownSize (1.14s)
+            --- FAIL: TestIntegration/FsMkdir/FsUploadUnknownSize/FsPutUnknownSize (0.29s)
+            --- FAIL: TestIntegration/FsMkdir/FsUploadUnknownSize/FsUpdateUnknownSize (0.85s)
+        --- PASS: TestIntegration/FsMkdir/FsRootCollapse (0.82s)
+        --- SKIP: TestIntegration/FsMkdir/FsDirSetModTime (0.00s)
+        --- SKIP: TestIntegration/FsMkdir/FsMkdirMetadata (0.00s)
+        --- SKIP: TestIntegration/FsMkdir/FsDirectory (0.00s)
+    --- PASS: TestIntegration/FsShutdown (0.14s)
+```
+
+Run single integration test (adjust remote name):
+
+```
+VAULT_TEST_REMOTE_NAME=vo: go test -short -run '^TestIntegration/FsMkdir/FsPutZeroLength' ./backend/vault/...
+```

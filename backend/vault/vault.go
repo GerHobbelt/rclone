@@ -176,7 +176,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
 		ReadMimeType:            true,
-		SlowModTime:             true,
+		SlowModTime:             false, // true
 		About:                   f.About,
 		DirMove:                 f.DirMove,
 		Disconnect:              f.Disconnect,
@@ -420,7 +420,7 @@ func getFlowTotalChunks(objectSize int, chunkSize int64) int {
 // once. Files are only written to a temporary file, if the remote does not
 // support object size information.
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	fs.Debugf(f, "put %v [%v]", src.Remote(), src.Size())
+	fs.Debugf(f, "put %v [%v] [modtime=%v]", src.Remote(), src.Size(), src.ModTime(ctx))
 	var (
 		flowIdentifier string
 		err            error
@@ -493,6 +493,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 			Md5Sum:     sums[hash.MD5],
 			Sha1Sum:    sums[hash.SHA1],
 			Sha256Sum:  sums[hash.SHA256],
+			ModifiedAt: src.ModTime(ctx).Format(time.RFC3339),
 		},
 	}, nil
 }
@@ -860,13 +861,16 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 // Purge remove a folder.
 func (f *Fs) Purge(ctx context.Context, dir string) error {
 	t, err := f.api.ResolvePath(f.absPath(dir))
+	if err == fs.ErrorObjectNotFound {
+		return fs.ErrorDirNotFound
+	}
 	if err != nil {
 		return err
 	}
-	if t.NodeType != "FOLDER" {
-		return fmt.Errorf("can only purge folders, not %v", t.NodeType)
+	if t.NodeType == "FOLDER" || t.NodeType == "COLLECTION" {
+		return f.api.Remove(ctx, t)
 	}
-	return f.api.Remove(ctx, t)
+	return fmt.Errorf("can only purge folders and collections, not %v", t.NodeType)
 }
 
 func (f *Fs) Shutdown(ctx context.Context) error {
@@ -982,12 +986,15 @@ func (o *Object) ModTime(ctx context.Context) time.Time {
 		"January 2, 2006 15:04:05 UTC",
 		"2006-01-02T15:04:05.99Z",
 		"2006-01-02T15:04:05.999999Z",
+		time.RFC3339,
+		time.RFC3339Nano,
 	}
 	for _, l := range layouts {
-		if t, err := time.Parse(l, o.treeNode.ModifiedAt); err == nil {
+		if t, err := time.Parse(l, o.treeNode.PreDepositModifiedAt); err == nil {
 			return t
 		}
 	}
+
 	fs.Debugf(o, "failed to parse modification time layout: %v, falling back to epoch", o.treeNode.ModifiedAt)
 	return epoch // TODO: that may cause unnecessary uploads, if T differs too much
 }
@@ -1099,7 +1106,7 @@ func (dir *Dir) ModTime(ctx context.Context) time.Time {
 		return epoch
 	}
 	const layout = "January 2, 2006 15:04:05 UTC"
-	if t, err := time.Parse(layout, dir.treeNode.ModifiedAt); err == nil {
+	if t, err := time.Parse(layout, dir.treeNode.PreDepositModifiedAt); err == nil {
 		return t
 	}
 	return epoch
