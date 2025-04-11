@@ -273,9 +273,15 @@ func (api *API) ResolvePath(p string) (*TreeNode, error) {
 		return nil, fs.ErrorObjectNotFound
 	}
 	for len(segments) > 0 {
+		// TODO: when looking up weird names, like " ' @ < > & ? + ≠ from the
+		// PutFiles integration test, we fail to look up the value in the API;
+		// cf. https://go.dev/play/p/U1zkX4N4iKR
+		//
+		// However, the rest.Opts parameters use vs.Encode(), which should take
+		// care of most of the issues.
 		ts, err := api.FindTreeNodes(url.Values{
 			"parent": []string{fmt.Sprintf("%d", t.ID)},
-			"name":   []string{segments[0]},
+			"name":   []string{segments[0]}, // XXX: account for special chars
 		})
 		switch {
 		case err != nil:

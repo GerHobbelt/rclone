@@ -24,10 +24,12 @@ import (
 	"github.com/rclone/rclone/backend/vault/iotemp"
 	"github.com/rclone/rclone/backend/vault/retry"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/atexit"
+	"github.com/rclone/rclone/lib/encoder"
 )
 
 const (
@@ -96,6 +98,22 @@ func init() {
 				Help:     "Upload chunk size in bytes (limited)",
 				Default:  defaultUploadChunkSize,
 				Advanced: true,
+			},
+			{
+				Name:     config.ConfigEncoding,
+				Help:     config.ConfigEncodingHelp,
+				Advanced: true,
+				Default: (encoder.Display |
+					encoder.EncodeBackSlash |
+					encoder.EncodeDoubleQuote |
+					encoder.EncodeLtGt |
+					encoder.EncodeLeftSpace |
+					encoder.EncodeLeftTilde |
+					encoder.EncodeQuestion |
+					encoder.EncodeRightPeriod |
+					encoder.EncodeRightSpace |
+					encoder.EncodeWin |
+					encoder.EncodeInvalidUtf8),
 			},
 		},
 	})
@@ -299,8 +317,10 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 // ErrorIsDir if possible without doing any extra work,
 // otherwise ErrorObjectNotFound.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+	fmt.Printf("NEWOBJECT: %v\n", remote)
 	fs.Debugf(f, "new object at %v (%v)", remote, f.absPath(remote))
 	t, err := f.api.ResolvePath(f.absPath(remote))
+	fmt.Printf("NEWOBJECT resolve %v: %v %v\n", f.absPath(remote), t, err)
 	if err != nil {
 		return nil, err
 	}
