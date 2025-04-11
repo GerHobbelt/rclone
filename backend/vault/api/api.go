@@ -741,18 +741,6 @@ func (api *API) SendChunkWithBody(ctx context.Context, contentType string, body 
 		return nil, err
 	}
 	return resp, nil
-
-	// Parse the response
-	// bodyBytes, err := io.ReadAll(resp.Body)
-	// defer func() { _ = resp.Body.Close() }()
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// return &SendChunkResponse{
-	// 	Body:         bodyBytes,
-	// 	HTTPResponse: resp,
-	// }, nil
 }
 
 // TerminateDeposit terminates a deposit that is in progress and returns the parsed response.
@@ -766,26 +754,12 @@ func (api *API) TerminateDeposit(ctx context.Context, body TerminateDepositReque
 			"Referer":     api.refererURL("deposits"),
 		},
 	}
-
 	fs.Debugf(api, "terminating deposit: %d", body.DepositId)
 	resp, err := api.client.CallJSON(ctx, &opts, body, nil)
 	if err != nil {
 		return nil, err
 	}
-
 	return resp, nil
-
-	// Parse the response
-	// bodyBytes, err := io.ReadAll(resp.Body)
-	// defer func() { _ = resp.Body.Close() }()
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// return &TerminateDepositResponse{
-	// 	Body:         bodyBytes,
-	// 	HTTPResponse: resp,
-	// }, nil
 }
 
 // FinalizeDepositWithResponse finalizes a deposit and returns the parsed response.
@@ -806,18 +780,6 @@ func (api *API) FinalizeDepositWithResponse(ctx context.Context, body FinalizeDe
 		return nil, err
 	}
 	return resp, nil
-
-	// Parse the response
-	// bodyBytes, err := io.ReadAll(resp.Body)
-	// defer func() { _ = resp.Body.Close() }()
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// return &FinalizeDepositResponse{
-	// 	Body:         bodyBytes,
-	// 	HTTPResponse: resp,
-	// }, nil
 }
 
 // RegisterDepositV2WithResponse sends a deposit registration request and returns the parsed response.
@@ -851,7 +813,6 @@ func (api *API) RegisterDepositV2WithResponse(ctx context.Context, body Register
 		HTTPResponse: resp,
 		JSON200:      &RegisterDepositV2ResponsePayload{},
 	}
-
 	// If successful response with JSON content, parse it
 	if strings.Contains(resp.Header.Get("Content-Type"), "json") && resp.StatusCode == 200 {
 		var dest RegisterDepositV2ResponsePayload
@@ -866,12 +827,3 @@ func (api *API) RegisterDepositV2WithResponse(ctx context.Context, body Register
 
 	return response, nil
 }
-
-// TODO(martin): do two, then pass on
-
-// func (api *API) depositV2...
-
-// resp, err := f.depositsV2Client.VaultDepositApiRegisterDepositWithResponse(ctx, body)
-// resp, err = f.depositsV2Client.VaultDepositApiSendChunkWithBody(ctx, w.FormDataContentType(), &wbuf)
-// resp, err := f.depositsV2Client.VaultDepositApiTerminateDeposit(ctx, body)
-// resp, err := f.depositsV2Client.VaultDepositApiFinalizeDepositWithResponse(ctx, body)
