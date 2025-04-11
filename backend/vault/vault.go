@@ -67,7 +67,7 @@ const (
 	// this problem go away, but there's probably a better way to handle this --
 	// would be glad to have a short in person debug session (where we can try
 	// to replicate the issue in prod together, or the like)
-	defaultUploadChunkSize = 1 * fs.Mebi
+	defaultUploadChunkSize = 1_048_576
 )
 
 func init() {
