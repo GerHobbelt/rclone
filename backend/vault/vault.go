@@ -24,12 +24,10 @@ import (
 	"github.com/rclone/rclone/backend/vault/iotemp"
 	"github.com/rclone/rclone/backend/vault/retry"
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/atexit"
-	"github.com/rclone/rclone/lib/encoder"
 )
 
 const (
@@ -99,22 +97,22 @@ func init() {
 				Default:  defaultUploadChunkSize,
 				Advanced: true,
 			},
-			{
-				Name:     config.ConfigEncoding,
-				Help:     config.ConfigEncodingHelp,
-				Advanced: true,
-				Default: (encoder.Display |
-					encoder.EncodeBackSlash |
-					encoder.EncodeDoubleQuote |
-					encoder.EncodeLtGt |
-					encoder.EncodeLeftSpace |
-					encoder.EncodeLeftTilde |
-					encoder.EncodeQuestion |
-					encoder.EncodeRightPeriod |
-					encoder.EncodeRightSpace |
-					encoder.EncodeWin |
-					encoder.EncodeInvalidUtf8),
-			},
+			// {
+			// 	Name:     config.ConfigEncoding,
+			// 	Help:     config.ConfigEncodingHelp,
+			// 	Advanced: true,
+			// 	Default: (encoder.Display |
+			// 		encoder.EncodeBackSlash |
+			// 		encoder.EncodeDoubleQuote |
+			// 		encoder.EncodeLtGt |
+			// 		encoder.EncodeLeftSpace |
+			// 		encoder.EncodeLeftTilde |
+			// 		encoder.EncodeQuestion |
+			// 		encoder.EncodeRightPeriod |
+			// 		encoder.EncodeRightSpace |
+			// 		encoder.EncodeWin |
+			// 		encoder.EncodeInvalidUtf8),
+			// },
 		},
 	})
 }
