@@ -646,6 +646,13 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 				// We may recover from an HTTP 500 likely caused by a rare race
 				// condition in a database trigger, encountered in 05/2023.
 				fs.Debugf(f, "chunk upload retry: %v", resp.Status)
+				var err error = errors.New("vault chunk upload: HTTP 500")
+				return retry.RetryableError(err)
+			case resp.StatusCode == 408:
+				// 408 Request Timeout, this may be caused by network latency
+				// issues and we should retry
+				fs.Debugf(f, "chunk upload retry: %v", resp.Status)
+				var err error = errors.New("vault chunk upload: HTTP 408")
 				return retry.RetryableError(err)
 			case resp.StatusCode >= 400:
 				// TODO: we get a HTTP 404 from prod, with message: {"detail": "Not Found"}
