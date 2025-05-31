@@ -408,7 +408,7 @@ func (m *Metadata) WritePermissions(ctx context.Context) (err error) {
 // When all of the above are true, Graph indicates it has added the
 // user permission, but it immediately drops it
 //
-// See: https://github.com/rclone/rclone/issues/8465
+// See: https://github.com/artpar/rclone/issues/8465
 func (m *Metadata) orderPermissions(xs []*api.PermissionsType) {
 	// Return true if identity has any user permissions
 	hasUserIdentity := func(identity *api.IdentitySet) bool {

@@ -2,7 +2,7 @@ FROM golang:alpine AS builder
 
 ARG CGO_ENABLED=0
 
-WORKDIR /go/src/github.com/rclone/rclone/
+WORKDIR /go/src/github.com/artpar/rclone/
 
 RUN echo "**** Set Go Environment Variables ****" && \
     go env -w GOCACHE=/root/.cache/go-build
@@ -43,7 +43,7 @@ RUN echo "**** Install Dependencies ****" && \
     echo "Enable user_allow_other in fuse" && \
     echo "user_allow_other" >> /etc/fuse.conf
 
-COPY --from=builder /go/src/github.com/rclone/rclone/rclone /usr/local/bin/
+COPY --from=builder /go/src/github.com/artpar/rclone/rclone /usr/local/bin/
 
 RUN addgroup -g 1009 rclone && adduser -u 1009 -Ds /bin/sh -G rclone rclone
 

@@ -585,6 +585,6 @@ add them out of tree.
 This may be easier than using a plugin and is supported on all
 platforms not just macOS and Linux.
 
-This is explained further in https://github.com/rclone/rclone_out_of_tree_example
+This is explained further in https://github.com/artpar/rclone_out_of_tree_example
 which has an example of an out of tree backend `ram` (which is a
 renamed version of the `memory` backend).

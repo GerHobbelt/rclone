@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/lib/rest"
+	"github.com/artpar/rclone/fs"
+	"github.com/artpar/rclone/lib/rest"
 )
 
 func (o *Object) updateViaTus(ctx context.Context, in io.Reader, contentType string, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {

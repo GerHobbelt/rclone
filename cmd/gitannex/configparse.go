@@ -5,9 +5,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config"
-	"github.com/rclone/rclone/fs/fspath"
+	"github.com/artpar/rclone/fs"
+	"github.com/artpar/rclone/fs/config"
+	"github.com/artpar/rclone/fs/fspath"
 )
 
 type configID int

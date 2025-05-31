@@ -9,9 +9,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/artpar/rclone/fs/fshttp"
+	"github.com/artpar/rclone/lib/rest"
 	"github.com/oracle/oci-go-sdk/v65/common"
-	"github.com/rclone/rclone/fs/fshttp"
-	"github.com/rclone/rclone/lib/rest"
 )
 
 // Session represents an iCloud session

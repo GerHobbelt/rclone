@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rclone/rclone/fs/fspath"
+	"github.com/artpar/rclone/fs/fspath"
 )
 
 type layoutMode string

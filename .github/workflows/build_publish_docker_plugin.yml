@@ -16,7 +16,7 @@ on:
 
 jobs:
   build_docker_volume_plugin:
-    if: inputs.manual || github.repository == 'rclone/rclone'
+    if: inputs.manual || github.repository == 'artpar/rclone'
     name: Build docker plugin job
     runs-on: ubuntu-latest
     steps:

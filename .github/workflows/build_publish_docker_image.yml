@@ -20,7 +20,7 @@ on:
 
 jobs:
   build-image:
-    if: inputs.manual || (github.repository == 'rclone/rclone' && github.event_name != 'pull_request')
+    if: inputs.manual || (github.repository == 'artpar/rclone' && github.event_name != 'pull_request')
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -107,7 +107,7 @@ jobs:
           images: |
             ghcr.io/${{ env.REPO_NAME }}
           labels: |
-            org.opencontainers.image.url=https://github.com/rclone/rclone/pkgs/container/rclone
+            org.opencontainers.image.url=https://github.com/artpar/rclone/pkgs/container/rclone
             org.opencontainers.image.vendor=${{ github.repository_owner }}
             org.opencontainers.image.authors=rclone <https://github.com/rclone>
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -218,7 +218,7 @@ jobs:
             ${{ env.REPO_NAME }}
             ghcr.io/${{ env.REPO_NAME }}
           labels: |
-            org.opencontainers.image.url=https://github.com/rclone/rclone/pkgs/container/rclone
+            org.opencontainers.image.url=https://github.com/artpar/rclone/pkgs/container/rclone
             org.opencontainers.image.vendor=${{ github.repository_owner }}
             org.opencontainers.image.authors=rclone <https://github.com/rclone>
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}

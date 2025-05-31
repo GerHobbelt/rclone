@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/artpar/rclone/fs"
+	"github.com/artpar/rclone/lib/errcount"
 	"github.com/lanrat/extsort"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/lib/errcount"
 	"golang.org/x/sync/errgroup"
 )
 

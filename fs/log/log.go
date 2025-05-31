@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/rclone/rclone/fs"
+	"github.com/artpar/rclone/fs"
 )
 
 // OptionsInfo descripts the Options in use

@@ -12,15 +12,15 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/artpar/rclone/cmd/serve/proxy"
+	"github.com/artpar/rclone/fs"
+	"github.com/artpar/rclone/fs/hash"
+	httplib "github.com/artpar/rclone/lib/http"
+	"github.com/artpar/rclone/vfs"
+	"github.com/artpar/rclone/vfs/vfscommon"
 	"github.com/go-chi/chi/v5"
 	"github.com/rclone/gofakes3"
 	"github.com/rclone/gofakes3/signature"
-	"github.com/rclone/rclone/cmd/serve/proxy"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/hash"
-	httplib "github.com/rclone/rclone/lib/http"
-	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfscommon"
 )
 
 type ctxKey int

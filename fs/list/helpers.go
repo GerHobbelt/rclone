@@ -3,8 +3,8 @@ package list
 import (
 	"context"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/accounting"
+	"github.com/artpar/rclone/fs"
+	"github.com/artpar/rclone/fs/accounting"
 )
 
 // Listing helpers used by backends

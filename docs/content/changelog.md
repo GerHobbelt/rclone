@@ -7,7 +7,7 @@ description: "Rclone Changelog"
 
 ## v1.69.3 - 2025-05-21
 
-[See commits](https://github.com/rclone/rclone/compare/v1.69.2...v1.69.3)
+[See commits](https://github.com/artpar/rclone/compare/v1.69.2...v1.69.3)
 
 * Bug Fixes
     * build: Reapply update github.com/golang-jwt/jwt/v5 from 5.2.1 to 5.2.2 to fix CVE-2025-30204 (dependabot[bot])
@@ -15,7 +15,7 @@ description: "Rclone Changelog"
 
 ## v1.69.2 - 2025-05-01
 
-[See commits](https://github.com/rclone/rclone/compare/v1.69.1...v1.69.2)
+[See commits](https://github.com/artpar/rclone/compare/v1.69.1...v1.69.2)
 
 * Bug fixes
     * accounting: Fix percentDiff calculation -- (Anagh Kumar Baranwal)
@@ -59,7 +59,7 @@ description: "Rclone Changelog"
 
 ## v1.69.1 - 2025-02-14
 
-[See commits](https://github.com/rclone/rclone/compare/v1.69.0...v1.69.1)
+[See commits](https://github.com/artpar/rclone/compare/v1.69.0...v1.69.1)
 
 * Bug Fixes
     * lib/oauthutil: Fix redirect URL mismatch errors (Nick Craig-Wood)
