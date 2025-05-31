@@ -809,7 +809,6 @@ put them back in again.` >}}
   * ben-ba <benjamin.brauner@gmx.de>
   * Eli Orzitzer <e_orz@yahoo.com>
   * Anthony Metzidis <anthony.metzidis@gmail.com>
-  * emyarod <afw5059@gmail.com>
   * keongalvin <keongalvin@gmail.com>
   * rarspace01 <rarspace01@users.noreply.github.com>
   * Paul Stern <paulstern45@gmail.com>
@@ -937,3 +936,40 @@ put them back in again.` >}}
   * Corentin Barreau <corentin@archive.org>
   * hiddenmarten <hiddenmarten@gmail.com>
   * Trevor Starick <trevor.starick@gmail.com>
+  * b-wimmer <132347192+b-wimmer@users.noreply.github.com>
+  * Jess <jess@jessie.cafe>
+  * Zachary Vorhies <zachvorhies@protonmail.com>
+  * Alexander Minbaev <minbaev@gmail.com>
+  * Joel K Biju <joelkbiju18@gmail.com>
+  * ll3006 <doublel3006@gmail.com>
+  * jbagwell-akamai <113531113+jbagwell-akamai@users.noreply.github.com>
+  * Michael Kebe <michael.kebe@gmail.com>
+  * Lorenz Brun <lorenz@brun.one>
+  * Dave Vasilevsky <djvasi@gmail.com> <dave@vasilevsky.ca>
+  * luzpaz <luzpaz@users.noreply.github.com>
+  * jack <9480542+jackusm@users.noreply.github.com>
+  * Jörn Friedrich Dreyer <jfd@butonic.de>
+  * alingse <alingse@foxmail.com>
+  * Fernando Fernández <ferferga@hotmail.com>
+  * eccoisle <167755281+eccoisle@users.noreply.github.com>
+  * Klaas Freitag <kraft@freisturz.de>
+  * Danny Garside <dannygarside@outlook.com>
+  * Samantha Bowen <sam@bbowen.net>
+  * simonmcnair <101189766+simonmcnair@users.noreply.github.com>
+  * huanghaojun <jasen.huang@ugreen.com>
+  * Enduriel <endur1el@protonmail.com>
+  * Markus Gerstel <markus.gerstel@osirium.com>
+  * simwai <16225108+simwai@users.noreply.github.com>
+  * Ben Alex <ben.alex@acegi.com.au>
+  * Klaas Freitag <opensource@freisturz.de> <klaas.freitag@kiteworks.com>
+  * Andrew Kreimer <algonell@gmail.com>
+  * Ed Craig-Wood <138211970+edc-w@users.noreply.github.com>
+  * Christian Richter <crichter@owncloud.com> <1058116+dragonchaser@users.noreply.github.com>
+  * Ralf Haferkamp <r.haferkamp@opencloud.eu>
+  * Jugal Kishore <me@devjugal.com>
+  * Tho Neyugn <nguyentruongtho@users.noreply.github.com>
+  * Ben Boeckel <mathstuf@users.noreply.github.com>
+  * Clément Wehrung <cwehrung@nurves.com>
+  * Jeff Geerling <geerlingguy@mac.com>
+  * Germán Casares <german.casares.march+github@gmail.com>
+  * fhuber <florian.huber@noris.de>

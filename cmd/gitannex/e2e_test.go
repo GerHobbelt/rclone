@@ -14,8 +14,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/artpar/rclone/fs"
-	"github.com/artpar/rclone/lib/buildinfo"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fstest"
+	"github.com/rclone/rclone/lib/buildinfo"
 )
 
 // checkRcloneBinaryVersion runs whichever rclone is on the PATH and checks
@@ -31,9 +32,7 @@ func checkRcloneBinaryVersion(t *testing.T) error {
 
 	cmd := exec.Command("rclone", "rc", "--loopback", "core/version")
 	stdout, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("failed to get rclone version: %w", err)
-	}
+	require.NoError(t, err)
 
 	var parsed versionInfo
 	if err := json.Unmarshal(stdout, &parsed); err != nil {
@@ -183,6 +182,11 @@ func (e *e2eTestingContext) createGitRepo(t *testing.T) {
 func skipE2eTestIfNecessary(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping due to short mode.")
+	}
+
+	// TODO(#7984): Port e2e tests to `fstest` framework.
+	if *fstest.RemoteName != "" {
+		t.Skip("Skipping because fstest remote was specified.")
 	}
 
 	// TODO: Support e2e tests on Windows. Need to evaluate the semantics of the

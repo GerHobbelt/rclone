@@ -10,9 +10,11 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/artpar/rclone/cmd/serve/nfs"
-	"github.com/artpar/rclone/vfs/vfscommon"
-	"github.com/artpar/rclone/vfs/vfstest"
+	"github.com/rclone/rclone/cmd/serve/nfs"
+	"github.com/rclone/rclone/fs/object"
+	"github.com/rclone/rclone/vfs"
+	"github.com/rclone/rclone/vfs/vfscommon"
+	"github.com/rclone/rclone/vfs/vfstest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,7 +40,7 @@ func TestMount(t *testing.T) {
 			nfs.Opt.HandleCacheDir = t.TempDir()
 			require.NoError(t, nfs.Opt.HandleCache.Set(cacheType))
 			// Check we can create a handler
-			_, err := nfs.NewHandler(context.Background(), nil, &nfs.Opt)
+			_, err := nfs.NewHandler(context.Background(), vfs.New(object.MemoryFs, nil), &nfs.Opt)
 			if errors.Is(err, nfs.ErrorSymlinkCacheNotSupported) || errors.Is(err, nfs.ErrorSymlinkCacheNoPermission) {
 				t.Skip(err.Error() + ": run with: go test -c && sudo setcap cap_dac_read_search+ep ./nfsmount.test && ./nfsmount.test -test.v")
 			}

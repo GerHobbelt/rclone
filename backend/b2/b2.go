@@ -16,28 +16,29 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/artpar/rclone/backend/b2/api"
-	"github.com/artpar/rclone/fs"
-	"github.com/artpar/rclone/fs/accounting"
-	"github.com/artpar/rclone/fs/config"
-	"github.com/artpar/rclone/fs/config/configmap"
-	"github.com/artpar/rclone/fs/config/configstruct"
-	"github.com/artpar/rclone/fs/fserrors"
-	"github.com/artpar/rclone/fs/fshttp"
-	"github.com/artpar/rclone/fs/hash"
-	"github.com/artpar/rclone/fs/operations"
-	"github.com/artpar/rclone/fs/walk"
-	"github.com/artpar/rclone/lib/bucket"
-	"github.com/artpar/rclone/lib/encoder"
-	"github.com/artpar/rclone/lib/multipart"
-	"github.com/artpar/rclone/lib/pacer"
-	"github.com/artpar/rclone/lib/pool"
-	"github.com/artpar/rclone/lib/rest"
+	"github.com/rclone/rclone/backend/b2/api"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/config"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/config/configstruct"
+	"github.com/rclone/rclone/fs/fserrors"
+	"github.com/rclone/rclone/fs/fshttp"
+	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/list"
+	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/lib/bucket"
+	"github.com/rclone/rclone/lib/encoder"
+	"github.com/rclone/rclone/lib/multipart"
+	"github.com/rclone/rclone/lib/pacer"
+	"github.com/rclone/rclone/lib/pool"
+	"github.com/rclone/rclone/lib/rest"
 )
 
 const (
@@ -300,14 +301,13 @@ type Fs struct {
 
 // Object describes a b2 object
 type Object struct {
-	fs       *Fs               // what this object is part of
-	remote   string            // The remote path
-	id       string            // b2 id of the file
-	modTime  time.Time         // The modified time of the object if known
-	sha1     string            // SHA-1 hash if known
-	size     int64             // Size of the object
-	mimeType string            // Content-Type of the object
-	meta     map[string]string // The object metadata if known - may be nil - with lower case keys
+	fs       *Fs       // what this object is part of
+	remote   string    // The remote path
+	id       string    // b2 id of the file
+	modTime  time.Time // The modified time of the object if known
+	sha1     string    // SHA-1 hash if known
+	size     int64     // Size of the object
+	mimeType string    // Content-Type of the object
 }
 
 // ------------------------------------------------------------
@@ -590,12 +590,7 @@ func (f *Fs) authorizeAccount(ctx context.Context) error {
 
 // hasPermission returns if the current AuthorizationToken has the selected permission
 func (f *Fs) hasPermission(permission string) bool {
-	for _, capability := range f.info.Allowed.Capabilities {
-		if capability == permission {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(f.info.Allowed.Capabilities, permission)
 }
 
 // getUploadURL returns the upload info with the UploadURL and the AuthorizationToken
@@ -923,7 +918,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // of listing recursively that doing a directory traversal.
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
 	bucket, directory := f.split(dir)
-	list := walk.NewListRHelper(callback)
+	list := list.NewHelper(callback)
 	listR := func(bucket, directory, prefix string, addBucket bool) error {
 		last := ""
 		return f.list(ctx, bucket, directory, prefix, addBucket, true, 0, f.opt.Versions, false, func(remote string, object *api.File, isDirectory bool) error {
@@ -1276,7 +1271,7 @@ func (f *Fs) purge(ctx context.Context, dir string, oldOnly bool, deleteHidden b
 	toBeDeleted := make(chan *api.File, f.ci.Transfers)
 	var wg sync.WaitGroup
 	wg.Add(f.ci.Transfers)
-	for i := 0; i < f.ci.Transfers; i++ {
+	for range f.ci.Transfers {
 		go func() {
 			defer wg.Done()
 			for object := range toBeDeleted {
@@ -1605,9 +1600,6 @@ func (o *Object) decodeMetaDataRaw(ID, SHA1 string, Size int64, UploadTimestamp 
 	if err != nil {
 		return err
 	}
-	// For now, just set "mtime" in metadata
-	o.meta = make(map[string]string, 1)
-	o.meta["mtime"] = o.modTime.Format(time.RFC3339Nano)
 	return nil
 }
 
@@ -1887,13 +1879,6 @@ func (o *Object) getOrHead(ctx context.Context, method string, options []fs.Open
 		Info:            Info,
 	}
 
-	// Embryonic metadata support - just mtime
-	o.meta = make(map[string]string, 1)
-	modTime, err := parseTimeStringHelper(info.Info[timeKey])
-	if err == nil {
-		o.meta["mtime"] = modTime.Format(time.RFC3339Nano)
-	}
-
 	// When reading files from B2 via cloudflare using
 	// --b2-download-url cloudflare strips the Content-Length
 	// headers (presumably so it can inject stuff) so use the old
@@ -1950,7 +1935,7 @@ func init() {
 // urlEncode encodes in with % encoding
 func urlEncode(in string) string {
 	var out bytes.Buffer
-	for i := 0; i < len(in); i++ {
+	for i := range len(in) {
 		c := in[i]
 		if noNeedToEncode[c] {
 			_ = out.WriteByte(c)
@@ -2271,7 +2256,7 @@ See: https://www.backblaze.com/docs/cloud-storage-lifecycle-rules
 	},
 }
 
-func (f *Fs) lifecycleCommand(ctx context.Context, name string, arg []string, opt map[string]string) (out interface{}, err error) {
+func (f *Fs) lifecycleCommand(ctx context.Context, name string, arg []string, opt map[string]string) (out any, err error) {
 	var newRule api.LifecycleRule
 	if daysStr := opt["daysFromHidingToDeleting"]; daysStr != "" {
 		days, err := strconv.Atoi(daysStr)
@@ -2360,7 +2345,7 @@ Durations are parsed as per the rest of rclone, 2h, 7d, 7w etc.
 	},
 }
 
-func (f *Fs) cleanupCommand(ctx context.Context, name string, arg []string, opt map[string]string) (out interface{}, err error) {
+func (f *Fs) cleanupCommand(ctx context.Context, name string, arg []string, opt map[string]string) (out any, err error) {
 	maxAge := defaultMaxAge
 	if opt["max-age"] != "" {
 		maxAge, err = fs.ParseDuration(opt["max-age"])
@@ -2383,7 +2368,7 @@ it would do.
 `,
 }
 
-func (f *Fs) cleanupHiddenCommand(ctx context.Context, name string, arg []string, opt map[string]string) (out interface{}, err error) {
+func (f *Fs) cleanupHiddenCommand(ctx context.Context, name string, arg []string, opt map[string]string) (out any, err error) {
 	return nil, f.cleanUp(ctx, true, false, 0)
 }
 
@@ -2402,7 +2387,7 @@ var commandHelp = []fs.CommandHelp{
 // The result should be capable of being JSON encoded
 // If it is a string or a []string it will be shown to the user
 // otherwise it will be JSON encoded and shown to the user like that
-func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[string]string) (out interface{}, err error) {
+func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[string]string) (out any, err error) {
 	switch name {
 	case "lifecycle":
 		return f.lifecycleCommand(ctx, name, arg, opt)

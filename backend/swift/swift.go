@@ -8,29 +8,31 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ncw/swift/v2"
-	"github.com/artpar/rclone/fs"
-	"github.com/artpar/rclone/fs/config"
-	"github.com/artpar/rclone/fs/config/configmap"
-	"github.com/artpar/rclone/fs/config/configstruct"
-	"github.com/artpar/rclone/fs/fserrors"
-	"github.com/artpar/rclone/fs/fshttp"
-	"github.com/artpar/rclone/fs/hash"
-	"github.com/artpar/rclone/fs/operations"
-	"github.com/artpar/rclone/fs/walk"
-	"github.com/artpar/rclone/lib/atexit"
-	"github.com/artpar/rclone/lib/bucket"
-	"github.com/artpar/rclone/lib/encoder"
-	"github.com/artpar/rclone/lib/pacer"
-	"github.com/artpar/rclone/lib/random"
-	"github.com/artpar/rclone/lib/readers"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/config/configstruct"
+	"github.com/rclone/rclone/fs/fserrors"
+	"github.com/rclone/rclone/fs/fshttp"
+	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/list"
+	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/lib/atexit"
+	"github.com/rclone/rclone/lib/bucket"
+	"github.com/rclone/rclone/lib/encoder"
+	"github.com/rclone/rclone/lib/pacer"
+	"github.com/rclone/rclone/lib/random"
+	"github.com/rclone/rclone/lib/readers"
 )
 
 // Constants
@@ -417,10 +419,8 @@ func shouldRetry(ctx context.Context, err error) (bool, error) {
 	}
 	// If this is a swift.Error object extract the HTTP error code
 	if swiftError, ok := err.(*swift.Error); ok {
-		for _, e := range retryErrorCodes {
-			if swiftError.StatusCode == e {
-				return true, err
-			}
+		if slices.Contains(retryErrorCodes, swiftError.StatusCode) {
+			return true, err
 		}
 	}
 	// Check for generic failure conditions
@@ -701,7 +701,7 @@ func (f *Fs) listContainerRoot(ctx context.Context, container, directory, prefix
 	if !recurse {
 		opts.Delimiter = '/'
 	}
-	return f.c.ObjectsWalk(ctx, container, &opts, func(ctx context.Context, opts *swift.ObjectsOpts) (interface{}, error) {
+	return f.c.ObjectsWalk(ctx, container, &opts, func(ctx context.Context, opts *swift.ObjectsOpts) (any, error) {
 		var objects []swift.Object
 		var err error
 		err = f.pacer.Call(func() (bool, error) {
@@ -846,7 +846,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // of listing recursively than doing a directory traversal.
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
 	container, directory := f.split(dir)
-	list := walk.NewListRHelper(callback)
+	list := list.NewHelper(callback)
 	listR := func(container, directory, prefix string, addContainer bool) error {
 		return f.list(ctx, container, directory, prefix, addContainer, true, false, func(entry fs.DirEntry) error {
 			return list.Add(entry)
@@ -1378,9 +1378,7 @@ func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 	meta := o.headers.ObjectMetadata()
 	meta.SetModTime(modTime)
 	newHeaders := meta.ObjectHeaders()
-	for k, v := range newHeaders {
-		o.headers[k] = v
-	}
+	maps.Copy(o.headers, newHeaders)
 	// Include any other metadata from request
 	for k, v := range o.headers {
 		if strings.HasPrefix(k, "X-Object-") {
@@ -1450,7 +1448,7 @@ func (o *Object) removeSegmentsLargeObject(ctx context.Context, container string
 // encoded but we need '&' encoded.
 func urlEncode(str string) string {
 	var buf bytes.Buffer
-	for i := 0; i < len(str); i++ {
+	for i := range len(str) {
 		c := str[i]
 		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '/' || c == '.' || c == '_' || c == '-' {
 			_ = buf.WriteByte(c)

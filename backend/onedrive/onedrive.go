@@ -20,26 +20,27 @@ import (
 	"sync"
 	"time"
 
-	"github.com/artpar/rclone/backend/onedrive/api"
-	"github.com/artpar/rclone/backend/onedrive/quickxorhash"
-	"github.com/artpar/rclone/fs"
-	"github.com/artpar/rclone/fs/config"
-	"github.com/artpar/rclone/fs/config/configmap"
-	"github.com/artpar/rclone/fs/config/configstruct"
-	"github.com/artpar/rclone/fs/config/obscure"
-	"github.com/artpar/rclone/fs/fserrors"
-	"github.com/artpar/rclone/fs/fshttp"
-	"github.com/artpar/rclone/fs/hash"
-	"github.com/artpar/rclone/fs/log"
-	"github.com/artpar/rclone/fs/operations"
-	"github.com/artpar/rclone/fs/walk"
-	"github.com/artpar/rclone/lib/atexit"
-	"github.com/artpar/rclone/lib/dircache"
-	"github.com/artpar/rclone/lib/encoder"
-	"github.com/artpar/rclone/lib/oauthutil"
-	"github.com/artpar/rclone/lib/pacer"
-	"github.com/artpar/rclone/lib/readers"
-	"github.com/artpar/rclone/lib/rest"
+	"github.com/rclone/rclone/backend/onedrive/api"
+	"github.com/rclone/rclone/backend/onedrive/quickxorhash"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/config/configstruct"
+	"github.com/rclone/rclone/fs/config/obscure"
+	"github.com/rclone/rclone/fs/fserrors"
+	"github.com/rclone/rclone/fs/fshttp"
+	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/list"
+	"github.com/rclone/rclone/fs/log"
+	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/fs/walk"
+	"github.com/rclone/rclone/lib/atexit"
+	"github.com/rclone/rclone/lib/dircache"
+	"github.com/rclone/rclone/lib/encoder"
+	"github.com/rclone/rclone/lib/oauthutil"
+	"github.com/rclone/rclone/lib/pacer"
+	"github.com/rclone/rclone/lib/readers"
+	"github.com/rclone/rclone/lib/rest"
 )
 
 const (
@@ -55,6 +56,7 @@ const (
 	driveTypeSharepoint         = "documentLibrary"
 	defaultChunkSize            = 10 * fs.Mebi
 	chunkSizeMultiple           = 320 * fs.Kibi
+	maxSinglePartSize           = 4 * fs.Mebi
 
 	regionGlobal = "global"
 	regionUS     = "us"
@@ -137,6 +139,21 @@ func init() {
 					Help:  "Azure and Office 365 operated by Vnet Group in China",
 				},
 			},
+		}, {
+			Name: "upload_cutoff",
+			Help: `Cutoff for switching to chunked upload.
+
+Any files larger than this will be uploaded in chunks of chunk_size.
+
+This is disabled by default as uploading using single part uploads
+causes rclone to use twice the storage on Onedrive business as when
+rclone sets the modification time after the upload Onedrive creates a
+new version.
+
+See: https://github.com/rclone/rclone/issues/1716
+`,
+			Default:  fs.SizeSuffix(-1),
+			Advanced: true,
 		}, {
 			Name: "chunk_size",
 			Help: `Chunk size to upload files with - must be multiple of 320k (327,680 bytes).
@@ -745,6 +762,7 @@ Examples:
 // Options defines the configuration for this backend
 type Options struct {
 	Region                  string               `config:"region"`
+	UploadCutoff            fs.SizeSuffix        `config:"upload_cutoff"`
 	ChunkSize               fs.SizeSuffix        `config:"chunk_size"`
 	DriveID                 string               `config:"drive_id"`
 	DriveType               string               `config:"drive_type"`
@@ -1021,6 +1039,13 @@ func (f *Fs) setUploadChunkSize(cs fs.SizeSuffix) (old fs.SizeSuffix, err error)
 	return
 }
 
+func checkUploadCutoff(cs fs.SizeSuffix) error {
+	if cs > maxSinglePartSize {
+		return fmt.Errorf("%v is greater than %v", cs, maxSinglePartSize)
+	}
+	return nil
+}
+
 // NewFs constructs an Fs from the path, container:path
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
@@ -1033,6 +1058,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	err = checkUploadChunkSize(opt.ChunkSize)
 	if err != nil {
 		return nil, fmt.Errorf("onedrive: chunk size: %w", err)
+	}
+	err = checkUploadCutoff(opt.UploadCutoff)
+	if err != nil {
+		return nil, fmt.Errorf("onedrive: upload cutoff: %w", err)
 	}
 
 	if opt.DriveID == "" || opt.DriveType == "" {
@@ -1093,7 +1122,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 
 	// Disable change polling in China region
-	// See: https://github.com/artpar/rclone/issues/6444
+	// See: https://github.com/rclone/rclone/issues/6444
 	if f.opt.Region == regionCN {
 		f.features.ChangeNotify = nil
 	}
@@ -1148,7 +1177,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		}
 		// XXX: update the old f here instead of returning tempF, since
 		// `features` were already filled with functions having *f as a receiver.
-		// See https://github.com/artpar/rclone/issues/2182
+		// See https://github.com/rclone/rclone/issues/2182
 		f.dirCache = tempF.dirCache
 		f.root = tempF.root
 		// return an error with an fs which points to the parent
@@ -1396,7 +1425,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 	// So we have to filter things outside of the root which is
 	// inefficient.
 
-	list := walk.NewListRHelper(callback)
+	list := list.NewHelper(callback)
 
 	// list a folder conventionally - used for shared folders
 	var listFolder func(dir string) error
@@ -2468,6 +2497,10 @@ func (o *Object) uploadFragment(ctx context.Context, url string, start int64, to
 				return false, nil
 			}
 			return true, fmt.Errorf("retry this chunk skipping %d bytes: %w", skip, err)
+		} else if err != nil && resp != nil && resp.StatusCode == http.StatusNotFound {
+			fs.Debugf(o, "Received 404 error: assuming eventual consistency problem with session - retrying chunk: %v", err)
+			time.Sleep(5 * time.Second) // a little delay to help things along
+			return true, err
 		}
 		if err != nil {
 			return shouldRetry(ctx, resp, err)
@@ -2532,10 +2565,7 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, src fs.Objec
 	remaining := size
 	position := int64(0)
 	for remaining > 0 {
-		n := int64(o.fs.opt.ChunkSize)
-		if remaining < n {
-			n = remaining
-		}
+		n := min(remaining, int64(o.fs.opt.ChunkSize))
 		seg := readers.NewRepeatableReader(io.LimitReader(in, n))
 		fs.Debugf(o, "Uploading segment %d/%d size %d", position, size, n)
 		info, err = o.uploadFragment(ctx, uploadURL, position, size, seg, n, options...)
@@ -2565,8 +2595,8 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, src fs.Objec
 // This function will set modtime and metadata after uploading, which will create a new version for the remote file
 func (o *Object) uploadSinglepart(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (info *api.Item, err error) {
 	size := src.Size()
-	if size < 0 || size > int64(fs.SizeSuffix(4*1024*1024)) {
-		return nil, errors.New("size passed into uploadSinglepart must be >= 0 and <= 4 MiB")
+	if size < 0 || size > int64(maxSinglePartSize) {
+		return nil, fmt.Errorf("size passed into uploadSinglepart must be >= 0 and <= %v", maxSinglePartSize)
 	}
 
 	fs.Debugf(o, "Starting singlepart upload")
@@ -2619,9 +2649,9 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	size := src.Size()
 
 	var info *api.Item
-	if size > 0 {
+	if size > 0 && size >= int64(o.fs.opt.UploadCutoff) {
 		info, err = o.uploadMultipart(ctx, in, src, options...)
-	} else if size == 0 {
+	} else if size >= 0 {
 		info, err = o.uploadSinglepart(ctx, in, src, options...)
 	} else {
 		return errors.New("unknown-sized upload not supported")

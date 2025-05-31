@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/artpar/rclone/backend/crypt"
-	"github.com/artpar/rclone/fs"
-	"github.com/artpar/rclone/fs/hash"
-	"github.com/artpar/rclone/fs/walk"
+	"github.com/rclone/rclone/backend/crypt"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/walk"
 )
 
 // ListJSONItem in the struct which gets marshalled for each line
@@ -283,7 +284,8 @@ func StatJSON(ctx context.Context, fsrc fs.Fs, remote string, opt *ListJSONOpt) 
 			return nil, nil
 		}
 		// Check the root directory exists
-		_, err := fsrc.List(ctx, "")
+		entries, err := fsrc.List(ctx, "")
+		accounting.Stats(ctx).Listed(int64(len(entries)))
 		if err != nil {
 			return nil, err
 		}
@@ -322,6 +324,7 @@ func StatJSON(ctx context.Context, fsrc fs.Fs, remote string, opt *ListJSONOpt) 
 		parent = ""
 	}
 	entries, err := fsrc.List(ctx, parent)
+	accounting.Stats(ctx).Listed(int64(len(entries)))
 	if err == fs.ErrorDirNotFound {
 		return nil, nil
 	} else if err != nil {

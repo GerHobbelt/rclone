@@ -13,12 +13,14 @@ import (
 
 	"github.com/anacrolix/dms/soap"
 
-	"github.com/artpar/rclone/fs/config/configfile"
-	"github.com/artpar/rclone/vfs"
+	"github.com/rclone/rclone/cmd/serve/servetest"
+	"github.com/rclone/rclone/fs/config/configfile"
+	"github.com/rclone/rclone/fs/rc"
+	"github.com/rclone/rclone/vfs"
+	"github.com/rclone/rclone/vfs/vfscommon"
 
-	_ "github.com/artpar/rclone/backend/local"
-	"github.com/artpar/rclone/cmd/serve/dlna/dlnaflags"
-	"github.com/artpar/rclone/fs"
+	_ "github.com/rclone/rclone/backend/local"
+	"github.com/rclone/rclone/fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,12 +35,14 @@ const (
 )
 
 func startServer(t *testing.T, f fs.Fs) {
-	opt := dlnaflags.Opt
+	opt := Opt
 	opt.ListenAddr = testBindAddress
 	var err error
-	dlnaServer, err = newServer(f, &opt)
+	dlnaServer, err = newServer(context.Background(), f, &opt, &vfscommon.Opt)
 	assert.NoError(t, err)
-	assert.NoError(t, dlnaServer.Serve())
+	go func() {
+		assert.NoError(t, dlnaServer.Serve())
+	}()
 	baseURL = "http://" + dlnaServer.HTTPConn.Addr().String()
 }
 
@@ -98,7 +102,7 @@ func TestServeContent(t *testing.T) {
 
 // Check that ContentDirectory#Browse returns appropriate metadata on the root container.
 func TestContentDirectoryBrowseMetadata(t *testing.T) {
-	// Sample from: https://github.com/artpar/rclone/issues/3253#issuecomment-524317469
+	// Sample from: https://github.com/rclone/rclone/issues/3253#issuecomment-524317469
 	req, err := http.NewRequest("POST", baseURL+serviceControlURL, strings.NewReader(`
 <?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
@@ -270,4 +274,11 @@ func TestContentDirectoryBrowseDirectChildren(t *testing.T) {
 		require.Contains(t, string(body), "/r/subdir3/Subs/video.sub")
 
 	}
+}
+
+func TestRc(t *testing.T) {
+	servetest.TestRc(t, rc.Params{
+		"type":           "dlna",
+		"vfs_cache_mode": "off",
+	})
 }

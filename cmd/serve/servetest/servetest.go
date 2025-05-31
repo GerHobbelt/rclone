@@ -13,10 +13,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/artpar/rclone/cmd/serve/proxy/proxyflags"
-	"github.com/artpar/rclone/fs"
-	"github.com/artpar/rclone/fs/config/configmap"
-	"github.com/artpar/rclone/fstest"
+	"github.com/rclone/rclone/cmd/serve/proxy"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,9 +50,9 @@ func run(t *testing.T, name string, start StartFn, useProxy bool) {
 		cmd := "go run " + prog + " " + fremote.Root()
 
 		// FIXME this is untidy setting a global variable!
-		proxyflags.Opt.AuthProxy = cmd
+		proxy.Opt.AuthProxy = cmd
 		defer func() {
-			proxyflags.Opt.AuthProxy = ""
+			proxy.Opt.AuthProxy = ""
 		}()
 	}
 	config, cleanup := start(f)

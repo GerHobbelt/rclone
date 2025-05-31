@@ -4,45 +4,11 @@ package serve
 import (
 	"errors"
 
-	"github.com/artpar/rclone/cmd"
-	"github.com/artpar/rclone/cmd/serve/dlna"
-	"github.com/artpar/rclone/cmd/serve/docker"
-	"github.com/artpar/rclone/cmd/serve/ftp"
-	"github.com/artpar/rclone/cmd/serve/http"
-	"github.com/artpar/rclone/cmd/serve/nfs"
-	"github.com/artpar/rclone/cmd/serve/restic"
-	"github.com/artpar/rclone/cmd/serve/s3"
-	"github.com/artpar/rclone/cmd/serve/sftp"
-	"github.com/artpar/rclone/cmd/serve/webdav"
+	"github.com/rclone/rclone/cmd"
 	"github.com/spf13/cobra"
 )
 
 func init() {
-	Command.AddCommand(http.Command)
-	if webdav.Command != nil {
-		Command.AddCommand(webdav.Command)
-	}
-	if restic.Command != nil {
-		Command.AddCommand(restic.Command)
-	}
-	if dlna.Command != nil {
-		Command.AddCommand(dlna.Command)
-	}
-	if ftp.Command != nil {
-		Command.AddCommand(ftp.Command)
-	}
-	if sftp.Command != nil {
-		Command.AddCommand(sftp.Command)
-	}
-	if docker.Command != nil {
-		Command.AddCommand(docker.Command)
-	}
-	if nfs.Command != nil {
-		Command.AddCommand(nfs.Command)
-	}
-	if s3.Command != nil {
-		Command.AddCommand(s3.Command)
-	}
 	cmd.Root.AddCommand(Command)
 }
 
