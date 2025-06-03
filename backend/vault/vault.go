@@ -22,12 +22,12 @@ import (
 
 	"github.com/rclone/rclone/backend/vault/api"
 	"github.com/rclone/rclone/backend/vault/iotemp"
-	"github.com/rclone/rclone/backend/vault/retry"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/atexit"
+	"github.com/rclone/rclone/lib/pacer"
 )
 
 const (
@@ -70,6 +70,10 @@ const (
 	//
 	// TODO: revisit this size
 	defaultUploadChunkSize = 1_048_576
+	// Pacer options
+	minSleep      = 500 * time.Millisecond
+	maxSleep      = 60 * time.Millisecond
+	decayConstant = 2
 )
 
 func init() {
@@ -161,6 +165,7 @@ type Fs struct {
 	opt      Options      // vault options
 	api      *api.API     // API wrapper
 	features *fs.Features // optional features
+	pacer    *fs.Pacer
 	// On a first put, we register a deposit to get a deposit id. Any
 	// subsequent upload will be associated with that deposit id. On shutdown,
 	// we send a finalize signal.
@@ -190,6 +195,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		root: root,
 		opt:  opt,
 		api:  api,
+		pacer: fs.NewPacer(ctx, pacer.NewDefault(
+			pacer.MinSleep(minSleep),
+			pacer.MaxSleep(maxSleep),
+			pacer.DecayConstant(decayConstant))),
 	}
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
@@ -569,6 +578,9 @@ func (info *UploadInfo) IsDone() bool {
 // upload is the main transfer function for a single file, which is wrapped in
 // an UploadInfo value. Returns a hasher that contains the supported hashes of
 // of the file object.
+// upload is the main transfer function for a single file, which is wrapped in
+// an UploadInfo value. Returns a hasher that contains the supported hashes of
+// of the file object.
 func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHasher, err error) {
 	hasher, err = hash.NewMultiHasherTypes(f.Hashes())
 	if err != nil {
@@ -585,7 +597,6 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 			w        = multipart.NewWriter(&wbuf)               // multipart writer
 			mimeType = "application/octet-stream"               // file mime type
 			n        int64                                      // actual length of this chunk
-			err      error                                      // any error
 			fw       io.Writer                                  // formfile writer
 			resp     *http.Response                             // deposit API response
 		)
@@ -628,51 +639,44 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 		if err := w.Close(); err != nil {
 			return nil, err
 		}
+
 		// (5e) send chunk
 		// The context passed may have a too eager deadline, so we give it a
 		// fresh timeout per chunk upload request (note: this did not seem to
 		// have been the cause of the previously encountered 404).
-		ctx, cancel := context.WithTimeout(context.Background(), UploadChunkTimeout)
-		defer cancel()
-		backoff := retry.WithCappedDuration(UploadChunkBackoffCap, retry.NewFibonacci(UploadChunkBackoffBase))
-		err = retry.Do(ctx, backoff, func(ctx context.Context) error {
+		err = f.pacer.Call(func() (bool, error) { // No need for context.WithTimeout here, pacer manages it.
 			fs.Debugf(f, "starting upload... (buffer size: %v, [T=%v])", wbuf.Len(), time.Since(f.started))
+			// Note: The pacer already provides the context.
 			resp, err = f.api.SendChunkWithBody(ctx, w.FormDataContentType(), &wbuf)
 			switch {
 			case err != nil:
-				// This may be cause by infrastructure errors, like DNS
-				// failures, etc., so we can retry them as well. It's important
-				// that we check this case first.
-				return retry.RetryableError(err)
+				// This may be caused by infrastructure errors, like DNS
+				// failures, etc., so we can retry them as well.
+				// Return true to indicate it's retryable.
+				return true, err
 			case resp.StatusCode >= 500: // refs. VLT-518
 				// We may recover from an HTTP 500 likely caused by a rare race
 				// condition in a database trigger, encountered in 05/2023.
 				fs.Debugf(f, "chunk upload retry: %v", resp.Status)
-				var err error = errors.New("vault chunk upload: HTTP 500")
-				return retry.RetryableError(err)
+				return true, fmt.Errorf("vault chunk upload: HTTP %d", resp.StatusCode)
 			case resp.StatusCode == 408:
 				// 408 Request Timeout, this may be caused by network latency
 				// issues and we should retry
 				fs.Debugf(f, "chunk upload retry: %v", resp.Status)
-				var err error = errors.New("vault chunk upload: HTTP 408")
-				return retry.RetryableError(err)
+				return true, fmt.Errorf("vault chunk upload: HTTP %d", resp.StatusCode)
 			case resp.StatusCode >= 400:
-				// TODO: we get a HTTP 404 from prod, with message: {"detail": "Not Found"}
-				// TODO: we get a 404 because deposit switches to "REPLICATED" quickly
+				// For other 4xx errors, these are typically not retryable by the pacer
 				fs.Debugf(f, "chunk upload failed (deposit id=%v)", f.inflightDepositID)
 				fs.Debugf(f, "got %v -- response dump follows", resp.Status)
-				b, err := httputil.DumpResponse(resp, true)
-				if err != nil {
-					return err
+				b, dumpErr := httputil.DumpResponse(resp, true)
+				if dumpErr != nil {
+					return false, dumpErr // Not retryable, and failed to dump response
 				}
 				fs.Debugf(f, string(b))
-				// TODO: this can be triggered by running "sync", then
-				// "CTRL-C", then without delay rerunning the "sync" command;
-				// if the repeated command is issued after a delay, this issue
-				// does not surface
-				return fmt.Errorf("api responded with an HTTP %v, stopping chunk upload", resp.StatusCode)
+				// Not retryable by the pacer, return the actual error
+				return false, fmt.Errorf("api responded with an HTTP %v, stopping chunk upload", resp.StatusCode)
 			default:
-				return nil
+				return false, nil // Success, no retry needed
 			}
 		})
 		// When chunk retry failed, we bail out.
