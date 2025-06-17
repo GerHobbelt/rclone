@@ -975,3 +975,10 @@ put them back in again.` >}}
   * fhuber <florian.huber@noris.de>
   * wbulot <wbulot@hotmail.com>
   * Jeremy Daer <jeremydaer@gmail.com>
+  * Oleksiy Stashok <ostashok@tesla.com>
+  * PrathameshLakawade <prathameshlakawade@gmail.com>
+  * Nathanael Demacon <7271496+quantumsheep@users.noreply.github.com>
+  * ahxxm <ahxxm@users.noreply.github.com>
+  * Flora Thiebaut <johann.thiebaut@gmail.com>
+  * kingston125 <support@filelu.com>
+  * Ser-Bul <30335009+Ser-Bul@users.noreply.github.com>
