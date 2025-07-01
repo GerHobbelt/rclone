@@ -25,9 +25,23 @@ ADD https://github.com/ufoscout/docker-compose-wait/releases/download/2.12.1/wai
 RUN echo "6c340afe7608744d099834972ca243ee5eaed6f1 /wait" | sha1sum --check && \
     chmod +x /wait
 
+# Try to copy local "mc" command into container, otherwise bootstrap will
+# download it on the fly (which may be slower).
+#
+# Put "mc" into "minio-mc" in the root of the build context. Adjust SHA256 as needed.
+COPY minio-mc* /tmp/
+RUN if [ -f /tmp/minio-mc ]; then \
+        cp /tmp/minio-mc /usr/local/bin/mc; \
+    else \
+        mkdir -p /usr/local/bin \
+        curl -sL --fail https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc; \
+        echo 'cd0603931a11ee022f5b51a7b0842525df54ff25 mc' | sha1sum --check \
+    fi \
+    chmod +x /usr/local/bin/mc
+
 # this will be the bootstrap script that runs, when the vault containers runs
 ADD dev/bootstrap.sh bootstrap.sh
-RUN echo "a45490b064f32b3cbe61a0c9df08c951f9d5f1c1 ./bootstrap.sh" | sha1sum --check && \
+RUN echo "29095cf2e914a1629ac267ab7d3baa98a04ba9d0 ./bootstrap.sh" | sha1sum --check && \
     chmod +x ./bootstrap.sh
 
 # TODO: we may remove these values here, because vault will need a docker
