@@ -22,9 +22,11 @@ reset := $(shell tput sgr0)
 # SHA1 of the current "mc" tool, this may change; please adjust that as needed.
 MC_SHA1 = cd0603931a11ee022f5b51a7b0842525df54ff25
 
+.DEFAULT_GOAL := help
+
 .PHONY: help
 help:
-	@echo "Makefile for vault images, run `make image` to build vault image"
+	@echo "Makefile for vault images, run 'make image' to build vault image"
 
 .PHONY: cache-mc
 cache-mc:
@@ -36,7 +38,7 @@ cache-mc:
 		chmod +x ./cache/mc; \
 		echo "$(green)[mc] Downloaded and cached$(reset)"; \
 	else \
-		echo "cd0603931a11ee022f5b51a7b0842525df54ff25  ./cache/mc" | sha1sum --check; \
+		echo "$(MC_SHA1)  ./cache/mc" | sha1sum --check; \
 		echo "$(green)[mc] Using cached mc$(reset)"; \
 	fi
 
@@ -67,7 +69,7 @@ clean-cache:
 	rm -rf ./cache
 
 .PHONY: clean-all
-clean-all: clean clean-cachee
+clean-all: clean clean-cache
 
 .PHONY: up
 up:
