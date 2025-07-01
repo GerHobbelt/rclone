@@ -19,16 +19,31 @@ higreen := $(shell tput setaf 10)
 green := $(shell tput setaf 2)
 reset := $(shell tput sgr0)
 
+# SHA1 of the current "mc" tool, this may change; please adjust that as needed.
+MC_SHA1 = cd0603931a11ee022f5b51a7b0842525df54ff25
+
 .PHONY: help
 help:
 	@echo "Makefile for vault images, run `make image` to build vault image"
 
+.PHONY: cache-mc
+cache-mc:
+	@if [ ! -f ./cache/mc ]; then \
+		echo "$(green)[mc] Downloading mc to cache...$(reset)"; \
+		mkdir -p ./cache; \
+		curl -sL --fail https://dl.min.io/client/mc/release/linux-amd64/mc -o ./cache/mc; \
+		echo "$(MC_SHA1)  ./cache/mc" | sha1sum --check; \
+		chmod +x ./cache/mc; \
+		echo "$(green)[mc] Downloaded and cached$(reset)"; \
+	else \
+		echo "cd0603931a11ee022f5b51a7b0842525df54ff25  ./cache/mc" | sha1sum --check; \
+		echo "$(green)[mc] Using cached mc$(reset)"; \
+	fi
+
 .PHONY: image
-image:
-	# temporary copy "mc" binary, to avoid download from
-	# https://dl.min.io/client/mc/release/linux-amd64/mc (cf. bootstrap.sh)
-	# cp ./mc $(VAULT)
-	#
+image: cache-mc
+	# [image] copying mc from cache to build context
+	cp ./cache/mc $(VAULT)/mc
 	# [image] temporarily copying bootstrap.sh into build context
 	cp ./bootstrap.sh $(VAULT)/dev
 	# [image] copy patch file to run minimal workers only
@@ -46,6 +61,13 @@ image:
 .PHONY: clean
 clean:
 	docker rmi -f vault:latest
+
+.PHONY: clean-cache
+clean-cache:
+	rm -rf ./cache
+
+.PHONY: clean-all
+clean-all: clean clean-cachee
 
 .PHONY: up
 up:
