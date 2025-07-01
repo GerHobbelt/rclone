@@ -73,9 +73,9 @@ clean-all: clean clean-cache
 
 .PHONY: up
 up:
-	docker-compose up
+	docker compose up
 
 .PHONY: down
 down:
-	docker-compose down
+	docker compose down
 
