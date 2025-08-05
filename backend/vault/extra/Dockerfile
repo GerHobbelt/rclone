@@ -6,6 +6,7 @@
 # TODO(martin): apt-get update makes this image non-reproducible; we assume
 # that this does not affect vault
 #
+# TODO(martin): switch to a uv debian: https://docs.astral.sh/uv/guides/integration/docker/#available-images
 FROM python:3.12.3-slim-bookworm@sha256:afc139a0a640942491ec481ad8dda10f2c5b753f5c969393b12480155fe15a63
 RUN apt-get update && apt-get install -y --no-install-recommends make build-essential git curl libmagic-dev
 WORKDIR /app
