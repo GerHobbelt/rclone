@@ -82,6 +82,7 @@ require (
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
 	github.com/yunify/qingstor-sdk-go/v3 v3.2.0
 	github.com/zeebo/blake3 v0.2.4
+	github.com/zeebo/xxh3 v1.0.2
 	go.etcd.io/bbolt v1.4.0
 	goftp.io/server/v2 v2.0.1
 	golang.org/x/crypto v0.36.0
@@ -95,7 +96,6 @@ require (
 	gopkg.in/validator.v2 v2.0.1
 	gopkg.in/yaml.v3 v3.0.1
 	storj.io/uplink v1.13.1
-
 )
 
 require (
