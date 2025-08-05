@@ -19,8 +19,9 @@ higreen := $(shell tput setaf 10)
 green := $(shell tput setaf 2)
 reset := $(shell tput sgr0)
 
-# SHA1 of the current "mc" tool, this may change; please adjust that as needed.
-MC_SHA1 = cd0603931a11ee022f5b51a7b0842525df54ff25
+# SHA1 of the current "mc" tool, this may change; please adjust that as needed;
+# so we a least recognize when a binary changed
+MC_SHA1 = 34e8ff4eb61529eab8b42efd94ba57461d94d066
 
 .DEFAULT_GOAL := help
 
@@ -33,7 +34,7 @@ cache-mc:
 	@if [ ! -f ./cache/mc ]; then \
 		echo "$(green)[mc] Downloading mc to cache...$(reset)"; \
 		mkdir -p ./cache; \
-		curl -sL --fail https://dl.min.io/client/mc/release/linux-amd64/mc -o ./cache/mc; \
+		curl -vL --fail https://dl.min.io/client/mc/release/linux-amd64/mc -o ./cache/mc; \
 		echo "$(MC_SHA1)  ./cache/mc" | sha1sum --check; \
 		chmod +x ./cache/mc; \
 		echo "$(green)[mc] Downloaded and cached$(reset)"; \
