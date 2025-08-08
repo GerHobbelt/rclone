@@ -550,10 +550,11 @@ func (f *Fs) objectSize(in io.Reader, src fs.ObjectInfo) (tempfile string, size 
 			return "", 0, err
 		}
 		size = int(fi.Size())
+		return tempfile, size, nil
 	default:
 		size = int(src.Size()) // most objects will support size
+		return "", size, nil
 	}
-	return "", size, nil
 }
 
 // UploadInfo contains all information for a single file upload.
