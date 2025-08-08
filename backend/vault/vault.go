@@ -512,7 +512,8 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	// We do not strictly need the hash sums, but we can compute the on the
 	// fly, so we can augment the TreeNode value.
 	sums := h.Sums()
-	fs.Debugf(f, "chunk upload complete")
+	fs.Debugf(f, "chunk upload complete with hashes: MD5=%s, SHA1=%s, SHA256=%s",
+		sums[hash.MD5], sums[hash.SHA1], sums[hash.SHA256])
 	return &Object{
 		fs:     f,
 		remote: src.Remote(),
