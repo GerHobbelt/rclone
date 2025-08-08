@@ -585,6 +585,11 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 	if err != nil {
 		return nil, err
 	}
+
+	// DEBUG: Log upload info
+	fs.Debugf(f, "Starting upload for %s: totalSize=%d, totalChunks=%d, chunkSize=%d",
+		info.src.Remote(), info.flowTotalSize, info.flowTotalChunks, f.opt.ChunkSize)
+
 	for info.i < info.flowTotalChunks {
 		info.i++
 		fs.Infof(f, "[>>>] uploading file %v chunk %d/%d [%v]", info.src.Remote(), info.i, info.flowTotalChunks, time.Since(f.started))
@@ -602,6 +607,14 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 		if n, err = io.Copy(&buf, wrapIn); err != nil { // n <= opt.ChunkSize
 			return nil, err
 		}
+
+		// DEBUG: Log chunk details
+		fs.Debugf(f, "Chunk %d: read %d bytes", info.i, n)
+		if info.i == 1 && n <= 100 {
+			fs.Debugf(f, "First chunk content (hex): %x", buf.Bytes())
+			fs.Debugf(f, "First chunk content (string): %q", buf.String())
+		}
+
 		// (5a) on first chunk, try to find mime type
 		if info.i == 1 {
 			ext := path.Ext(path.Base(info.src.Remote()))
@@ -609,7 +622,9 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 			if mimeType == "" {
 				mimeType = http.DetectContentType(buf.Bytes())
 			}
+			fs.Debugf(f, "Detected MIME type: %s for extension %s", mimeType, ext)
 		}
+
 		// (5b) write multipart fields
 		mfw := &iotemp.MultipartFieldWriter{W: w}
 		mfw.WriteField("depositId", fmt.Sprintf("%v", f.inflightDepositID))
@@ -626,14 +641,25 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 		if err := mfw.Err(); err != nil {
 			return nil, err
 		}
+
+		// DEBUG: Log form fields
+		fs.Debugf(f, "Form fields - depositId: %d, chunk: %d/%d, size: %d/%d, file: %s",
+			f.inflightDepositID, info.i, info.flowTotalChunks, n, info.flowTotalSize,
+			filepath.Base(info.src.Remote()))
+
 		// (5c) write multipart file
 		formFileName := fmt.Sprintf("%s-%016d", info.flowIdentifier, info.i)
 		if fw, err = w.CreateFormFile("file", formFileName); err != nil { // can we use a random file name?
 			return nil, err
 		}
-		if _, err := io.Copy(fw, &buf); err != nil {
+		written, err := io.Copy(fw, &buf)
+		if err != nil {
 			return nil, err
 		}
+
+		// DEBUG: Verify copy
+		fs.Debugf(f, "Wrote %d bytes to form file (expected %d)", written, n)
+
 		// (5d) finalize multipart writer
 		if err := w.Close(); err != nil {
 			return nil, err
@@ -675,7 +701,9 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 				// Not retryable by the pacer, return the actual error
 				return false, fmt.Errorf("api responded with an HTTP %v, stopping chunk upload", resp.StatusCode)
 			default:
-				return false, nil // Success, no retry needed
+				// DEBUG: Success
+				fs.Debugf(f, "Chunk %d uploaded successfully (HTTP %d)", info.i, resp.StatusCode)
+				return false, nil
 			}
 		})
 		// When chunk retry failed, we bail out.
@@ -683,6 +711,12 @@ func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHa
 			return nil, err
 		}
 	}
+
+	// DEBUG: Log final hashes
+	sums := hasher.Sums()
+	fs.Debugf(f, "Upload complete - MD5: %s, SHA1: %s, SHA256: %s",
+		sums[hash.MD5], sums[hash.SHA1], sums[hash.SHA256])
+
 	return hasher, nil
 }
 
