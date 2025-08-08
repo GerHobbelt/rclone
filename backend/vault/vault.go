@@ -577,9 +577,6 @@ func (info *UploadInfo) IsDone() bool {
 // upload is the main transfer function for a single file, which is wrapped in
 // an UploadInfo value. Returns a hasher that contains the supported hashes of
 // of the file object.
-// upload is the main transfer function for a single file, which is wrapped in
-// an UploadInfo value. Returns a hasher that contains the supported hashes of
-// of the file object.
 func (f *Fs) upload(ctx context.Context, info *UploadInfo) (hasher *hash.MultiHasher, err error) {
 	hasher, err = hash.NewMultiHasherTypes(f.Hashes())
 	if err != nil {
