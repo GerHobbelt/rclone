@@ -536,10 +536,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 func (f *Fs) objectSize(in io.Reader, src fs.ObjectInfo) (tempfile string, size int, err error) {
 	switch {
 	case src.Size() == -1:
-		var (
-			fi os.FileInfo
-			f  *os.File
-		)
+		var fi os.FileInfo
 		// Source does not support size, we stream to a temporary file and
 		// return a reader of that file.
 		if tempfile, err = iotemp.TempFileFromReader(in); err != nil {
