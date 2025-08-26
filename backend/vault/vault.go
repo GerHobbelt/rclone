@@ -454,13 +454,25 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		flowIdentifier string
 		err            error
 	)
+
+	existingObj, err := f.NewObject(ctx, src.Remote())
+	if err == nil && existingObj != nil {
+		// Vault doesn't allow overwrites within same deposit
+		// Must finalize current deposit and start fresh
+		fs.Infof(f, "File exists, finalizing current deposit to allow overwrite")
+		if f.inflightDepositID != 0 {
+			f.finalize(ctx)
+			f.inflightDepositID = 0
+		}
+	}
+
 	// TODO: if src.Remote() is not just a basename, assume we have an "rclone
 	// mount" situation; then f.root will be / and the src.Remote() will have
 	// all path segments, but we would like to shift the path segments from
 	// src.Remote() to f.root
 
 	// (1) Start a deposit, if not already started. TODO: support resuming a deposit.
-	if err := f.requestDeposit(ctx); err != nil {
+	if err = f.requestDeposit(ctx); err != nil {
 		return nil, err
 	}
 	// (2) Get a flow identifier for file.
@@ -527,6 +539,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 			ModifiedAt:           time.Now().Format(time.RFC3339),
 		},
 	}, nil
+
 }
 
 // objectSize tries to get the size of an object. If the object does not
