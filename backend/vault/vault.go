@@ -326,10 +326,9 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 // ErrorIsDir if possible without doing any extra work,
 // otherwise ErrorObjectNotFound.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
-	fmt.Printf("NEWOBJECT: %v\n", remote)
-	fs.Debugf(f, "new object at %v (%v)", remote, f.absPath(remote))
+	fs.Debugf(f, "new object: at %v (%v)", remote, f.absPath(remote))
 	t, err := f.api.ResolvePath(f.absPath(remote))
-	fmt.Printf("NEWOBJECT resolve %v: %v %v\n", f.absPath(remote), t, err)
+	fs.Debugf(f, "new object: resolved %v to treenode %v %v\n", f.absPath(remote), t, err)
 	if err != nil {
 		return nil, err
 	}

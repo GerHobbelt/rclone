@@ -202,7 +202,7 @@ func (api *API) Login() (err error) {
 	if len(jar.Cookies(u)) < 2 {
 		msg := "expected at least two cookies for session"
 		fs.Debugf(api, msg)
-		return fmt.Errorf(msg)
+		return fmt.Errorf("%v", msg)
 	}
 	api.client.SetCookie(jar.Cookies(u)...)
 	return nil
