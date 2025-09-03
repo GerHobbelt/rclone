@@ -786,6 +786,9 @@ func (f *Fs) mkdir(ctx context.Context, dir string) error {
 // Rmdir deletes a folder. Collections cannot be removed.
 func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	fs.Debugf(f, "rmdir %v", f.absPath(dir))
+	if dir == "" {
+		return fs.ErrorCantPurge // root
+	}
 	t, err := f.api.ResolvePath(f.absPath(dir))
 	if err != nil {
 		return err
