@@ -205,13 +205,13 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		ReadMimeType:            true,
 		SlowModTime:             false, // true
 		About:                   f.About,
-		DirMove:                 f.DirMove,
 		Disconnect:              f.Disconnect,
 		PublicLink:              f.PublicLink,
 		Purge:                   f.Purge,
 		PutStream:               f.PutStream,
 		Shutdown:                f.Shutdown,
 		UserInfo:                f.UserInfo,
+		// BucketBased:             true, // are we?
 	}).Fill(ctx, f)
 	f.atexit = atexit.Register(f.Terminate)
 	return f, nil
@@ -870,69 +870,6 @@ func (f *Fs) Disconnect(ctx context.Context) error {
 	return nil
 }
 
-// DirMove implements server side renames and moves.
-func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string) error {
-	fs.Debugf(f, "dir move: %v [%v] => %v", src.Root(), srcRemote, f.root)
-	srcNode, err := f.api.ResolvePath(src.Root())
-	if err != nil {
-		return err
-	}
-	srcDirParent := path.Dir(src.Root())
-	srcDirParentNode, err := f.api.ResolvePath(srcDirParent)
-	if err != nil {
-		return err
-	}
-	dstDirParent := path.Dir(f.root)
-	dstDirParentNode, err := f.api.ResolvePath(dstDirParent)
-	if err != nil {
-		return err
-	}
-	if srcDirParentNode.ID == dstDirParentNode.ID {
-		fs.Debugf(f, "move is a rename")
-		t, err := f.api.ResolvePath(src.Root())
-		if err != nil {
-			return err
-		}
-		return f.api.Rename(ctx, t, path.Base(f.root))
-	} else {
-		switch {
-		case srcNode.NodeType == "FILE":
-			// If f.root exists and is a directory, we can move the file in
-			// there; if f.root does not exists, we treat the parent as the dir
-			// and the base as the file to copy to.
-			rootNode, err := f.api.ResolvePath(f.root)
-			if err == nil {
-				if err := f.api.Move(ctx, srcNode, rootNode); err != nil {
-					return err
-				}
-			} else {
-				dstDir := path.Dir(f.root)
-				if err := f.mkdir(ctx, dstDir); err != nil {
-					return err
-				}
-				dstDirNode, err := f.api.ResolvePath(dstDir)
-				if err != nil {
-					return err
-				}
-				if err := f.api.Move(ctx, srcNode, dstDirNode); err != nil {
-					return err
-				}
-				if path.Base(f.root) != path.Base(src.Root()) {
-					return f.api.Rename(ctx, srcNode, path.Base(f.root))
-				}
-			}
-		case srcNode.NodeType == "FOLDER" || srcNode.NodeType == "COLLECTION":
-			fs.Debugf(f, "moving dir to %v", f.root)
-			p, err := f.api.ResolvePath(f.root)
-			if err != nil {
-				return err
-			}
-			return f.api.Move(ctx, srcNode, p)
-		}
-	}
-	return nil
-}
-
 // Purge remove a folder.
 func (f *Fs) Purge(ctx context.Context, dir string) error {
 	t, err := f.api.ResolvePath(f.absPath(dir))
@@ -1212,8 +1149,8 @@ func (dir *Dir) ID() string { return dir.treeNode.Path }
 // visualizing geographic distribution of the data, etc.
 
 var (
-	_ fs.Abouter      = (*Fs)(nil)
-	_ fs.DirMover     = (*Fs)(nil)
+	_ fs.Abouter = (*Fs)(nil)
+	// _ fs.DirMover     = (*Fs)(nil)
 	_ fs.Disconnecter = (*Fs)(nil)
 	_ fs.Fs           = (*Fs)(nil)
 	_ fs.PublicLinker = (*Fs)(nil)
