@@ -385,25 +385,6 @@ func (api *API) SetModTime(ctx context.Context, t *TreeNode) error {
 	if err != nil {
 		return err
 	}
-	time.Sleep(1 * time.Second)
-	// Rename again.
-	opts = rest.Opts{
-		Method: "PATCH",
-		Path:   fmt.Sprintf("/treenodes/%d/", t.ID),
-		ExtraHeaders: map[string]string{
-			"X-CSRFTOKEN": api.csrfToken(ctx),
-			"Referer":     api.refererURL("treenodes"),
-		},
-	}
-	payload = struct {
-		Name string `json:"name"`
-	}{
-		Name: t.Name,
-	}
-	resp, err = api.client.CallJSON(ctx, &opts, payload, nil)
-	if err != nil {
-		return err
-	}
 	return resp.Body.Close()
 }
 
