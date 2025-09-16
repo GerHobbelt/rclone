@@ -214,6 +214,11 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		// BucketBased:             true, // are we?
 	}).Fill(ctx, f)
 	f.atexit = atexit.Register(f.Terminate)
+	// A file as root is not allowed.
+	t, _ := f.api.ResolvePath(root)
+	if t != nil && t.NodeType == "FILE" {
+		return f, fs.ErrorIsFile
+	}
 	return f, nil
 }
 
@@ -238,7 +243,14 @@ func (opt Options) EndpointNormalized() string {
 func (f *Fs) Name() string { return f.name }
 
 // Root returns the filesystem root.
-func (f *Fs) Root() string { return f.root }
+func (f *Fs) Root() string {
+	t, _ := f.api.ResolvePath(f.root)
+	if t != nil && t.NodeType == "FILE" {
+		return path.Dir(f.root)
+	}
+	return f.root
+
+}
 
 // String returns the name of the filesystem.
 func (f *Fs) String() string { return f.name }
