@@ -185,7 +185,7 @@ rc` command.
 
 You can use it like this:
 
-```sh
+```console
 $ rclone rc rc/noop param1=one param2=two
 {
     "param1": "one",
@@ -196,14 +196,14 @@ $ rclone rc rc/noop param1=one param2=two
 If the remote is running on a different URL than the default
 `http://localhost:5572/`, use the `--url` option to specify it:
 
-```sh
+```console
 rclone rc --url http://some.remote:1234/ rc/noop
 ```
 
 Or, if the remote is listening on a Unix socket, use the `--unix-socket` option
 instead:
 
-```sh
+```console
 rclone rc --unix-socket /tmp/rclone.sock rc/noop
 ```
 
@@ -216,7 +216,7 @@ remote server.
 `rclone rc` also supports a `--json` flag which can be used to send
 more complicated input parameters.
 
-```sh
+```console
 $ rclone rc --json '{ "p1": [1,"2",null,4], "p2": { "a":1, "b":2 } }' rc/noop
 {
     "p1": [
@@ -236,13 +236,13 @@ If the parameter being passed is an object then it can be passed as a
 JSON string rather than using the `--json` flag which simplifies the
 command line.
 
-```sh
+```console
 rclone rc operations/list fs=/tmp remote=test opt='{"showHash": true}'
 ```
 
 Rather than
 
-```sh
+```console
 rclone rc operations/list --json '{"fs": "/tmp", "remote": "test", "opt": {"showHash": true}}'
 ```
 
@@ -257,9 +257,9 @@ Each rc call is classified as a job and it is assigned its own id. By default
 jobs are executed immediately as they are created or synchronously.
 
 If `_async` has a true value when supplied to an rc call then it will
-return immediately with a job id and the task will be run in the
-background.  The `job/status` call can be used to get information of
-the background job.  The job can be queried for up to 1 minute after
+return immediately with a job id and execute id, and the task will be run in the
+background. The `job/status` call can be used to get information of
+the background job. The job can be queried for up to 1 minute after
 it has finished.
 
 It is recommended that potentially long running jobs, e.g. `sync/sync`,
@@ -269,22 +269,29 @@ response timing out.
 
 Starting a job with the `_async` flag:
 
-```sh
+```console
 $ rclone rc --json '{ "p1": [1,"2",null,4], "p2": { "a":1, "b":2 }, "_async": true }' rc/noop
 {
-    "jobid": 2
+    "jobid": 2,
+    "executeId": "d794c33c-463e-4acf-b911-f4b23e4f40b7"
 }
 ```
+
+The `jobid` is a unique identifier for the job within this rclone instance.
+The `executeId` identifies the rclone process instance and changes after
+rclone restart. Together, the pair (`executeId`, `jobid`) uniquely identifies
+a job across rclone restarts.
 
 Query the status to see if the job has finished.  For more information
 on the meaning of these return parameters see the `job/status` call.
 
-```sh
+```console
 $ rclone rc --json '{ "jobid":2 }' job/status
 {
     "duration": 0.000124163,
     "endTime": "2018-10-27T11:38:07.911245881+01:00",
     "error": "",
+    "executeId": "d794c33c-463e-4acf-b911-f4b23e4f40b7",
     "finished": true,
     "id": 2,
     "output": {
@@ -305,16 +312,30 @@ $ rclone rc --json '{ "jobid":2 }' job/status
 }
 ```
 
-`job/list` can be used to show the running or recently completed jobs
+`job/list` can be used to show running or recently completed jobs along with their status
 
-```sh
+```console
 $ rclone rc job/list
 {
+    "executeId": "d794c33c-463e-4acf-b911-f4b23e4f40b7",
+    "finished_ids": [
+        1
+    ],
     "jobids": [
+        1,
+        2
+    ],
+    "running_ids": [
         2
     ]
 }
 ```
+
+This shows:
+- `executeId` - the current rclone instance ID (same for all jobs, changes after restart)
+- `jobids` - array of all job IDs (both running and finished)
+- `running_ids` - array of currently running job IDs
+- `finished_ids` - array of finished job IDs
 
 ### Setting config flags with _config
 
@@ -324,14 +345,14 @@ duration of an rc call only then pass in the `_config` parameter.
 This should be in the same format as the `main` key returned by
 [options/get](#options-get).
 
-```sh
+```console
 rclone rc --loopback options/get blocks=main
 ```
 
 You can see more help on these options with this command (see [the
 options blocks section](#option-blocks) for more info).
 
-```sh
+```console
 rclone rc --loopback options/info blocks=main
 ```
 
@@ -344,7 +365,7 @@ parameter, you would pass this parameter in your JSON blob.
 
 If using `rclone rc` this could be passed as
 
-```sh
+```console
 rclone rc sync/sync ... _config='{"CheckSum": true}'
 ```
 
@@ -371,20 +392,20 @@ pass in the `_filter` parameter.
 This should be in the same format as the `filter` key returned by
 [options/get](#options-get).
 
-```sh
+```console
 rclone rc --loopback options/get blocks=filter
 ```
 
 You can see more help on these options with this command (see [the
 options blocks section](#option-blocks) for more info).
 
-```sh
+```console
 rclone rc --loopback options/info blocks=filter
 ```
 
 For example, if you wished to run a sync with these flags
 
-```sh
+```text
 --max-size 1M --max-age 42s --include "a" --include "b"
 ```
 
@@ -396,7 +417,7 @@ you would pass this parameter in your JSON blob.
 
 If using `rclone rc` this could be passed as
 
-```sh
+```console
 rclone rc ... _filter='{"MaxSize":"1M", "IncludeRule":["a","b"], "MaxAge":"42s"}'
 ```
 
@@ -426,7 +447,7 @@ value. This allows caller to group stats under their own name.
 
 Stats for specific group can be accessed by passing `group` to `core/stats`:
 
-```sh
+```console
 $ rclone rc --json '{ "group": "job/1" }' core/stats
 {
     "speed": 12345
@@ -577,7 +598,7 @@ And this is equivalent to `/tmp/dir`
 ```
 
 ## Supported commands
-{{< rem autogenerated start "- run make rcdocs - don't edit here" >}}
+<!-- autogenerated start "- run make rcdocs - don't edit here" -->
 ### backend/command: Runs a backend command. {#backend-command}
 
 This takes the following parameters:
@@ -2298,7 +2319,6 @@ This takes the following parameters
 
 This returns an empty result on success, or an error.
 
- 
 This command takes an "fs" parameter. If this parameter is not
 supplied and if there is only one VFS in use then that VFS will be
 used. If there is more than one VFS in use then the "fs" parameter
@@ -2364,7 +2384,7 @@ supplied and if there is only one VFS in use then that VFS will be
 used. If there is more than one VFS in use then the "fs" parameter
 must be supplied.
 
-{{< rem autogenerated stop >}}
+<!-- autogenerated stop -->
 
 ## Accessing the remote control via HTTP {#api-http}
 
@@ -2416,7 +2436,7 @@ The response to a preflight OPTIONS request will echo the requested
 
 ### Using POST with URL parameters only
 
-```sh
+```console
 curl -X POST 'http://localhost:5572/rc/noop?potato=1&sausage=2'
 ```
 
@@ -2431,7 +2451,7 @@ Response
 
 Here is what an error response looks like:
 
-```sh
+```console
 curl -X POST 'http://localhost:5572/rc/error?potato=1&sausage=2'
 ```
 
@@ -2447,7 +2467,7 @@ curl -X POST 'http://localhost:5572/rc/error?potato=1&sausage=2'
 
 Note that curl doesn't return errors to the shell unless you use the `-f` option
 
-```sh
+```console
 $ curl -f -X POST 'http://localhost:5572/rc/error?potato=1&sausage=2'
 curl: (22) The requested URL returned error: 400 Bad Request
 $ echo $?
@@ -2456,7 +2476,7 @@ $ echo $?
 
 ### Using POST with a form
 
-```sh
+```console
 curl --data "potato=1" --data "sausage=2" http://localhost:5572/rc/noop
 ```
 
@@ -2472,7 +2492,7 @@ Response
 Note that you can combine these with URL parameters too with the POST
 parameters taking precedence.
 
-```sh
+```console
 curl --data "potato=1" --data "sausage=2" "http://localhost:5572/rc/noop?rutabaga=3&sausage=4"
 ```
 
@@ -2489,7 +2509,7 @@ Response
 
 ### Using POST with a JSON blob
 
-```sh
+```console
 curl -H "Content-Type: application/json" -X POST -d '{"potato":2,"sausage":1}' http://localhost:5572/rc/noop
 ```
 
@@ -2505,7 +2525,7 @@ response
 This can be combined with URL parameters too if required.  The JSON
 blob takes precedence.
 
-```sh
+```console
 curl -H "Content-Type: application/json" -X POST -d '{"potato":2,"sausage":1}' 'http://localhost:5572/rc/noop?rutabaga=3&potato=4'
 ```
 
@@ -2528,7 +2548,7 @@ To use these, first [install go](https://golang.org/doc/install).
 
 To profile rclone's memory use you can run:
 
-```sh
+```console
 go tool pprof -web http://localhost:5572/debug/pprof/heap
 ```
 
@@ -2537,7 +2557,7 @@ memory.
 
 You can also use the `-text` flag to produce a textual summary
 
-```sh
+```console
 $ go tool pprof -text http://localhost:5572/debug/pprof/heap
 Showing nodes accounting for 1537.03kB, 100% of 1537.03kB total
       flat  flat%   sum%        cum   cum%
@@ -2562,7 +2582,7 @@ alive which should have been garbage collected.
 
 See all active go routines using
 
-```sh
+```console
 curl http://localhost:5572/debug/pprof/goroutine?debug=1
 ```
 
