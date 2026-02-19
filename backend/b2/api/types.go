@@ -133,21 +133,30 @@ type File struct {
 	Info            map[string]string `json:"fileInfo"`        // The custom information that was uploaded with the file. This is a JSON object, holding the name/value pairs that were uploaded with the file.
 }
 
-// AuthorizeAccountResponse is as returned from the b2_authorize_account call
-type AuthorizeAccountResponse struct {
+// StorageAPI is as returned from the b2_authorize_account call
+type StorageAPI struct {
 	AbsoluteMinimumPartSize int      `json:"absoluteMinimumPartSize"` // The smallest possible size of a part of a large file.
-	AccountID               string   `json:"accountId"`               // The identifier for the account.
 	Allowed                 struct { // An object (see below) containing the capabilities of this auth token, and any restrictions on using it.
-		BucketID     string   `json:"bucketId"`     // When present, access is restricted to one bucket.
-		BucketName   string   `json:"bucketName"`   // When present, name of bucket - may be empty
-		Capabilities []string `json:"capabilities"` // A list of strings, each one naming a capability the key has.
+		Buckets []struct { // When present, access is restricted to one or more buckets.
+			ID   string `json:"id"`   // ID of bucket
+			Name string `json:"name"` // When present, name of bucket - may be empty
+		} `json:"buckets"`
+		Capabilities []string `json:"capabilities"` // A list of strings, each one naming a capability the key has for every bucket.
 		NamePrefix   any      `json:"namePrefix"`   // When present, access is restricted to files whose names start with the prefix
 	} `json:"allowed"`
 	APIURL              string `json:"apiUrl"`              // The base URL to use for all API calls except for uploading and downloading files.
-	AuthorizationToken  string `json:"authorizationToken"`  // An authorization token to use with all calls, other than b2_authorize_account, that need an Authorization header.
 	DownloadURL         string `json:"downloadUrl"`         // The base URL to use for downloading files.
 	MinimumPartSize     int    `json:"minimumPartSize"`     // DEPRECATED: This field will always have the same value as recommendedPartSize. Use recommendedPartSize instead.
 	RecommendedPartSize int    `json:"recommendedPartSize"` // The recommended size for each part of a large file. We recommend using this part size for optimal upload performance.
+}
+
+// AuthorizeAccountResponse is as returned from the b2_authorize_account call
+type AuthorizeAccountResponse struct {
+	AccountID          string   `json:"accountId"`          // The identifier for the account.
+	AuthorizationToken string   `json:"authorizationToken"` // An authorization token to use with all calls, other than b2_authorize_account, that need an Authorization header.
+	APIs               struct { // Supported APIs for this account / key. These are API-dependent JSON objects.
+		Storage StorageAPI `json:"storageApi"`
+	} `json:"apiInfo"`
 }
 
 // ListBucketsRequest is parameters for b2_list_buckets call
@@ -278,13 +287,13 @@ type StartLargeFileRequest struct {
 
 // StartLargeFileResponse is the response to StartLargeFileRequest
 type StartLargeFileResponse struct {
-	ID              string            `json:"fileId"`                    // The unique identifier for this version of this file. Used with b2_get_file_info, b2_download_file_by_id, and b2_delete_file_version.
-	Name            string            `json:"fileName"`                  // The name of this file, which can be used with b2_download_file_by_name.
-	AccountID       string            `json:"accountId"`                 // The identifier for the account.
-	BucketID        string            `json:"bucketId"`                  // The unique ID of the bucket.
-	ContentType     string            `json:"contentType"`               // The MIME type of the file.
-	Info            map[string]string `json:"fileInfo"`                  // The custom information that was uploaded with the file. This is a JSON object, holding the name/value pairs that were uploaded with the file.
-	UploadTimestamp Timestamp         `json:"uploadTimestamp,omitempty"` // This is a UTC time when this file was uploaded.
+	ID              string            `json:"fileId"`          // The unique identifier for this version of this file. Used with b2_get_file_info, b2_download_file_by_id, and b2_delete_file_version.
+	Name            string            `json:"fileName"`        // The name of this file, which can be used with b2_download_file_by_name.
+	AccountID       string            `json:"accountId"`       // The identifier for the account.
+	BucketID        string            `json:"bucketId"`        // The unique ID of the bucket.
+	ContentType     string            `json:"contentType"`     // The MIME type of the file.
+	Info            map[string]string `json:"fileInfo"`        // The custom information that was uploaded with the file. This is a JSON object, holding the name/value pairs that were uploaded with the file.
+	UploadTimestamp Timestamp         `json:"uploadTimestamp"` // This is a UTC time when this file was uploaded.
 }
 
 // GetUploadPartURLRequest is passed to b2_get_upload_part_url
