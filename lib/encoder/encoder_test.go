@@ -255,6 +255,47 @@ func TestDecodeHalf(t *testing.T) {
 	}
 }
 
+func TestTranscodePreservesLiteralFullwidthDot(t *testing.T) {
+	for _, mask := range []MultiEncoder{
+		EncodeRaw,
+		Base,
+		EncodeLtGt | EncodeDoubleQuote | EncodeLeftSpace | EncodeCtl | EncodeRightSpace | EncodeInvalidUtf8,
+	} {
+		t.Run(mask.String(), func(t *testing.T) {
+			assert.Equal(t, "３．２．１", mask.ToStandardName("３．２．１"))
+			assert.Equal(t, "３．２．１", mask.FromStandardName("３．２．１"))
+			assert.Equal(t, "dir/＃５．５/file.mp4", mask.FromStandardPath("dir/＃５．５/file.mp4"))
+		})
+	}
+}
+
+func TestTranscodeIsStableForMinimalExternalNames(t *testing.T) {
+	for _, tc := range []struct {
+		mask MultiEncoder
+		name string
+	}{
+		{EncodeRaw, "abc‛def"},
+		{EncodeRaw, "abc‛"},
+		{EncodeSlash, "‛／"},
+		{EncodeSlash, "３．２．１"},
+		{EncodeLtGt | EncodeDoubleQuote | EncodeLeftSpace | EncodeCtl | EncodeRightSpace | EncodeInvalidUtf8, "‛／"},
+	} {
+		t.Run(tc.mask.String()+"/"+tc.name, func(t *testing.T) {
+			standard := tc.mask.ToStandardName(tc.name)
+			got := tc.mask.FromStandardName(standard)
+			assert.Equal(t, tc.name, got)
+		})
+	}
+}
+
+func TestTranscodeDoesNotQuoteSafeQuoteRune(t *testing.T) {
+	drive115 := EncodeLtGt | EncodeDoubleQuote | EncodeLeftSpace | EncodeCtl | EncodeRightSpace | EncodeInvalidUtf8
+
+	assert.Equal(t, "abc‛xyz", EncodeRaw.ToStandardName("abc‛xyz"))
+	assert.Equal(t, "abc‛xyz", drive115.FromStandardName("abc‛xyz"))
+	assert.Equal(t, "abc‛", drive115.FromStandardName("abc‛"))
+}
+
 const oneDrive = (Standard |
 	EncodeWin |
 	EncodeBackSlash |

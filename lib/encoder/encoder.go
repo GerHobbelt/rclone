@@ -1235,190 +1235,10 @@ func FromStandardName(e Encoder, s string) string {
 	if e == Standard {
 		return s
 	}
-	
-	// Apply context-aware conversion from Standard to target encoding
 	if mask, ok := e.(MultiEncoder); ok {
-		return convertFromStandard(s, mask)
+		return transcodeName(Standard, mask, s)
 	}
-	
 	return e.Encode(Standard.Decode(s))
-}
-
-// convertFromStandard converts a string from Standard encoding to target encoding
-// while preserving legitimate Unicode characters that shouldn't be decoded
-func convertFromStandard(s string, targetMask MultiEncoder) string {
-	// Apply Standard decoding but be aware of what the target handles
-	decoded := applyStandardDecodeWithContext(s, targetMask)
-	
-	// FromStandardName should return the decoded form, not re-encode it
-	return decoded
-}
-
-// applyStandardDecodeWithContext applies Standard decoding but only decodes
-// characters that the target encoding actually handles
-func applyStandardDecodeWithContext(s string, targetMask MultiEncoder) string {
-	if s == "" {
-		return ""
-	}
-	
-	// Handle special dot cases
-	switch s {
-	case "．":
-		return "."
-	case "．．":
-		return ".."
-	}
-	
-	var out strings.Builder
-	out.Grow(len(s))
-	
-	i := 0
-	for i < len(s) {
-		r, size := utf8.DecodeRuneInString(s[i:])
-		
-		// Handle quoted characters
-		if r == QuoteRune && i+size < len(s) {
-			nextR, nextSize := utf8.DecodeRuneInString(s[i+size:])
-			
-			// Only unquote if the target encoding handles this character type
-			shouldUnquote := false
-			switch nextR {
-			case '／':
-				shouldUnquote = targetMask.Has(EncodeSlash)
-			case '＜', '＞':
-				shouldUnquote = targetMask.Has(EncodeLtGt)
-			case '＂':
-				shouldUnquote = targetMask.Has(EncodeDoubleQuote)
-			case '＇':
-				shouldUnquote = targetMask.Has(EncodeSingleQuote)
-			case '｀':
-				shouldUnquote = targetMask.Has(EncodeBackQuote)
-			case '＄':
-				shouldUnquote = targetMask.Has(EncodeDollar)
-			case '：':
-				shouldUnquote = targetMask.Has(EncodeColon)
-			case '？':
-				shouldUnquote = targetMask.Has(EncodeQuestion)
-			case '＊':
-				shouldUnquote = targetMask.Has(EncodeAsterisk)
-			case '｜':
-				shouldUnquote = targetMask.Has(EncodePipe)
-			case '＃':
-				shouldUnquote = targetMask.Has(EncodeHash)
-			case '％':
-				shouldUnquote = targetMask.Has(EncodePercent)
-			case '＼':
-				shouldUnquote = targetMask.Has(EncodeBackSlash)
-			case '［', '］':
-				shouldUnquote = targetMask.Has(EncodeSquareBracket)
-			case '；':
-				shouldUnquote = targetMask.Has(EncodeSemicolon)
-			case '！':
-				shouldUnquote = targetMask.Has(EncodeExclamation)
-			case '␀', '␡':
-				shouldUnquote = true // Always unquote control symbols
-			default:
-				if nextR >= '␀'+1 && nextR <= '␀'+0x1F {
-					shouldUnquote = true // Control characters
-				}
-			}
-			
-			if shouldUnquote {
-				// Decode the quoted character
-				switch nextR {
-				case '／':
-					out.WriteRune('/')
-				case '＜':
-					out.WriteRune('<')
-				case '＞':
-					out.WriteRune('>')
-				case '＂':
-					out.WriteRune('"')
-				case '＇':
-					out.WriteRune('\'')
-				case '｀':
-					out.WriteRune('`')
-				case '＄':
-					out.WriteRune('$')
-				case '：':
-					out.WriteRune(':')
-				case '？':
-					out.WriteRune('?')
-				case '＊':
-					out.WriteRune('*')
-				case '｜':
-					out.WriteRune('|')
-				case '＃':
-					out.WriteRune('#')
-				case '％':
-					out.WriteRune('%')
-				case '＼':
-					out.WriteRune('\\')
-				case '［':
-					out.WriteRune('[')
-				case '］':
-					out.WriteRune(']')
-				case '；':
-					out.WriteRune(';')
-				case '！':
-					out.WriteRune('!')
-				case '␀':
-					out.WriteRune(0)
-				case '␡':
-					out.WriteRune(0x7F)
-				default:
-					if nextR >= '␀'+1 && nextR <= '␀'+0x1F {
-						out.WriteRune(nextR - '␀')
-					} else {
-						out.WriteRune(nextR)
-					}
-				}
-				i += size + nextSize
-			} else {
-				// Don't unquote - keep as literal characters
-				out.WriteRune(r)
-				i += size
-			}
-		} else {
-			// Handle unquoted Standard encoding
-			switch r {
-			case '／':
-				// Only decode if target handles slash
-				if targetMask.Has(EncodeSlash) {
-					out.WriteRune('/')
-				} else {
-					out.WriteRune(r) // Keep as legitimate ／
-				}
-			case '．':
-				if Standard.Has(EncodeDot) {
-					out.WriteRune('.')
-				} else {
-					out.WriteRune(r)
-				}
-			case '␀':
-				if Standard.Has(EncodeZero) {
-					out.WriteRune(0)
-				} else {
-					out.WriteRune(r)
-				}
-			case '␡':
-				if Standard.Has(EncodeDel) {
-					out.WriteRune(0x7F)
-				} else {
-					out.WriteRune(r)
-				}
-			default:
-				if r >= '␀'+1 && r <= '␀'+0x1F && Standard.Has(EncodeCtl) {
-					out.WriteRune(r - '␀')
-				} else {
-					out.WriteRune(r)
-				}
-			}
-			i += size
-		}
-	}
-	
-	return out.String()
 }
 
 // ToStandardPath takes a / separated path in the given encoding
@@ -1447,116 +1267,35 @@ func ToStandardName(e Encoder, s string) string {
 	if e == Standard {
 		return s
 	}
-	
-	// If the source is a MultiEncoder, we need context-aware conversion
-	// to avoid quoting legitimate Unicode characters
 	if mask, ok := e.(MultiEncoder); ok {
-		return convertToStandard(s, mask)
+		return transcodeName(mask, Standard, s)
 	}
-	
 	return Standard.Encode(e.Decode(s))
 }
 
-// convertToStandard converts a string from source encoding to Standard encoding
-// while preserving legitimate Unicode characters that aren't encoded forms
-func convertToStandard(s string, sourceMask MultiEncoder) string {
-	// First decode according to source
-	decoded := sourceMask.Decode(s)
-	
-	// Then apply Standard encoding, but be aware of what the source handles
-	// to avoid quoting legitimate Unicode characters
-	return applyStandardWithContext(decoded, sourceMask)
+func transcodeName(src, dst MultiEncoder, external string) string {
+	return encodeMinimal(dst, src.Decode(external))
 }
 
-// applyStandardWithContext applies Standard encoding rules but only quotes
-// fullwidth characters if they represent encoded forms (i.e., the source
-// encoding handles that character type)
-func applyStandardWithContext(s string, sourceMask MultiEncoder) string {
-	if s == "" {
-		return ""
+func encodeMinimal(mask MultiEncoder, logical string) string {
+	encoded := mask.Encode(logical)
+	if !strings.ContainsRune(encoded, QuoteRune) {
+		return encoded
 	}
-	
-	// Handle special dot cases
-	if Standard.Has(EncodeDot) {
-		switch s {
-		case ".":
-			return "．"
-		case "..":
-			return "．．"
-		}
-	}
-	
-	var out strings.Builder
-	out.Grow(len(s))
-	
-	for _, r := range s {
-		// Handle characters that Standard always encodes
-		switch r {
-		case 0:
-			if Standard.Has(EncodeZero) {
-				out.WriteRune('␀')
-				continue
-			}
-		case '/':
-			if Standard.Has(EncodeSlash) {
-				out.WriteRune('／')
-				continue
-			}
-		case 0x7F:
-			if Standard.Has(EncodeDel) {
-				out.WriteRune('␡')
-				continue
-			}
-		}
-		
-		// Handle control characters
-		if r >= 1 && r <= 0x1F && Standard.Has(EncodeCtl) {
-			out.WriteRune('␀' + r)
+
+	for i := 0; i < len(encoded); {
+		r, size := utf8.DecodeRuneInString(encoded[i:])
+		if r != QuoteRune {
+			i += size
 			continue
 		}
-		
-		// Handle fullwidth characters - only quote if source handles that type
-		needsQuoting := false
-		switch r {
-		case '／':
-			needsQuoting = sourceMask.Has(EncodeSlash)
-		case '＜', '＞':
-			needsQuoting = sourceMask.Has(EncodeLtGt)
-		case '＂':
-			needsQuoting = sourceMask.Has(EncodeDoubleQuote)
-		case '＇':
-			needsQuoting = sourceMask.Has(EncodeSingleQuote)
-		case '｀':
-			needsQuoting = sourceMask.Has(EncodeBackQuote)
-		case '＄':
-			needsQuoting = sourceMask.Has(EncodeDollar)
-		case '：':
-			needsQuoting = sourceMask.Has(EncodeColon)
-		case '？':
-			needsQuoting = sourceMask.Has(EncodeQuestion)
-		case '＊':
-			needsQuoting = sourceMask.Has(EncodeAsterisk)
-		case '｜':
-			needsQuoting = sourceMask.Has(EncodePipe)
-		case '＃':
-			needsQuoting = sourceMask.Has(EncodeHash)
-		case '％':
-			needsQuoting = sourceMask.Has(EncodePercent)
-		case '＼':
-			needsQuoting = sourceMask.Has(EncodeBackSlash)
-		case '［', '］':
-			needsQuoting = sourceMask.Has(EncodeSquareBracket)
-		case '；':
-			needsQuoting = sourceMask.Has(EncodeSemicolon)
-		case '！':
-			needsQuoting = sourceMask.Has(EncodeExclamation)
+
+		candidate := encoded[:i] + encoded[i+size:]
+		if mask.Decode(candidate) == logical {
+			encoded = candidate
+			continue
 		}
-		
-		if needsQuoting {
-			out.WriteRune(QuoteRune)
-		}
-		out.WriteRune(r)
+		i += size
 	}
-	
-	return out.String()
+	return encoded
 }
