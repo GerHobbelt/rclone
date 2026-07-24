@@ -43,6 +43,7 @@ require (
 	github.com/gdamore/tcell/v2 v2.9.0
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/go-darwin/apfs v0.0.0-20211011131704-f84b94dbf348
+	github.com/gofrs/flock v0.13.0
 	github.com/go-git/go-billy/v5 v5.9.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
@@ -187,7 +188,6 @@ require (
 	github.com/go-playground/validator/v10 v10.30.3 // indirect
 	github.com/go-resty/resty/v2 v2.17.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect

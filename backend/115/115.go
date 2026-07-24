@@ -67,9 +67,7 @@ const (
 	StreamUploadLimit   = 5 * fs.Gibi // Max size for sample/streamed upload (traditional)
 	maxUploadCutoff     = 5 * fs.Gibi // maximum allowed size for singlepart uploads (OSS PutObject limit)
 
-	defaultTokenRefreshWindow = 10 * time.Minute // Refresh token 10 minutes before expiry when lifetime permits
-	minTokenRefreshWindow     = 30 * time.Second // Clamp refresh lead for very short-lived tokens
-	pkceVerifierLength        = 64               // Length for PKCE code verifier
+	pkceVerifierLength = 64 // Length for PKCE code verifier
 )
 
 // TraditionalRequest is the standard 115.com request structure for traditional API
@@ -81,6 +79,7 @@ func init() {
 		Name:        "115",
 		Description: "115 drive (supports Open API)",
 		NewFs:       NewFs,
+		Config:      Config,
 		CommandHelp: commandHelp,
 		Options: []fs.Option{{
 			Name: "cookie",
@@ -229,6 +228,68 @@ Minimum is 100 KiB, maximum is 5 GiB.`,
 	})
 }
 
+// Config performs the explicit cookie-backed device authorization used for
+// initial setup and token recovery.
+func Config(ctx context.Context, name string, m configmap.Mapper, configIn fs.ConfigIn) (*fs.ConfigOut, error) {
+	cookie, _ := m.Get("cookie")
+	switch configIn.State {
+	case "":
+		if token, ok := m.Get(config.ConfigToken); ok && token != "" {
+			return fs.ConfigConfirm("replace_token", false, "config_replace_token", "Replace the saved 115 token with a new device authorization?")
+		}
+		if cookie != "" {
+			return fs.ConfigGoto("login")
+		}
+		return fs.ConfigInput("cookie", "config_cookie", "Enter a valid 115 login cookie")
+	case "replace_token":
+		if configIn.Result != "true" {
+			return nil, nil
+		}
+		if cookie != "" {
+			return fs.ConfigGoto("login")
+		}
+		return fs.ConfigInput("cookie", "config_cookie", "Enter a valid 115 login cookie")
+	case "cookie":
+		cookie = strings.TrimSpace(configIn.Result)
+		if cookie == "" {
+			return fs.ConfigError("", "115 login cookie cannot be empty")
+		}
+		m.Set("cookie", cookie)
+		return fs.ConfigGoto("login")
+	case "login":
+		opt := new(Options)
+		if err := configstruct.Set(m, opt); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(opt.Cookie) == "" {
+			return fs.ConfigError("", "115 login cookie cannot be empty")
+		}
+		backend := &Fs{
+			name: name,
+			opt:  *opt,
+		}
+		backend.globalPacer = fs.NewPacer(ctx, pacer.NewDefault(
+			pacer.MinSleep(time.Duration(opt.PacerMinSleep)),
+			pacer.MaxSleep(maxSleep),
+			pacer.DecayConstant(decayConstant)))
+		backend.tradPacer = fs.NewPacer(ctx, pacer.NewDefault(
+			pacer.MinSleep(traditionalMinSleep),
+			pacer.MaxSleep(maxSleep),
+			pacer.DecayConstant(decayConstant)))
+		if _, _, err := oauthutil.ReauthenticateRotatingToken(ctx, name, m, func(ctx context.Context) (*oauth2.Token, error) {
+			if err := backend.login(ctx); err != nil {
+				return nil, err
+			}
+			return backend.loggedInToken()
+		}); err != nil {
+			return nil, fmt.Errorf("115 device authorization: %w", err)
+		}
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unknown config state %q", configIn.State)
+	}
+}
+
 func checkUploadChunkSize(cs fs.SizeSuffix) error {
 	if cs < minChunkSize {
 		return fmt.Errorf("%s is less than %s", cs, minChunkSize)
@@ -294,7 +355,6 @@ type Options struct {
 // Fs represents a remote 115 drive
 type Fs struct {
 	name          string
-	originalName  string // Original config name without modifications
 	root          string
 	opt           Options
 	features      *fs.Features
@@ -310,55 +370,57 @@ type Fs struct {
 	userkey       string // User key from traditional uploadinfo (needed for traditional upload init signature)
 	isShare       bool   // mark it is from shared or not
 	fileObj       *fs.Object
-	m             configmap.Mapper // config map for saving tokens
 
 	// Token management
-	tokenMu          sync.Mutex
-	tokenCond        *sync.Cond
-	tokenRefreshing  bool
-	accessToken      string
-	refreshToken     string
-	tokenExpiry      time.Time
-	tokenRefreshLead time.Duration
-	codeVerifier     string // For PKCE
-	tokenRenewer     *oauthutil.Renew
-	requestTokens    sync.Map // track tokens used per request to avoid redundant refreshes
-	loginMu          sync.Mutex
+	rotatingToken *oauthutil.RotatingTokenSource
+	tokenMu       sync.Mutex
+	accessToken   string
+	refreshToken  string
+	tokenExpiry   time.Time
+	codeVerifier  string // For PKCE
+	tokenRenewer  *oauthutil.RotatingRenew
+	requestTokens sync.Map // maps request options to the token generation used
+	loginMu       sync.Mutex
 }
 
-func (f *Fs) notifyTokenRenewerLocked() {
-	if f.tokenRenewer == nil {
-		return
-	}
-	if f.accessToken == "" || f.refreshToken == "" {
-		return
-	}
-	token := &oauth2.Token{
-		AccessToken:  f.accessToken,
-		TokenType:    "Bearer",
-		RefreshToken: f.refreshToken,
-		Expiry:       f.tokenExpiry,
-	}
-	f.tokenRenewer.UpdateToken(token)
+type requestToken struct {
+	accessToken string
+	generation  uint64
+	retried     bool
 }
 
-func (f *Fs) rememberRequestToken(opts *rest.Opts, token string) {
+func (f *Fs) rememberRequestToken(opts *rest.Opts, token string, generation uint64) {
 	if opts == nil || token == "" {
 		return
 	}
-	f.requestTokens.Store(opts, token)
-}
-
-func (f *Fs) requestTokenUsed(opts *rest.Opts) (string, bool) {
-	if opts == nil {
-		return "", false
-	}
-	if value, ok := f.requestTokens.Load(opts); ok {
-		if token, ok := value.(string); ok {
-			return token, true
+	record := requestToken{accessToken: token, generation: generation}
+	if previous, ok := f.requestTokens.Load(opts); ok {
+		if previousRecord, ok := previous.(requestToken); ok {
+			record.retried = previousRecord.retried
 		}
 	}
-	return "", false
+	f.requestTokens.Store(opts, record)
+}
+
+func (f *Fs) requestTokenUsed(opts *rest.Opts) (requestToken, bool) {
+	if opts == nil {
+		return requestToken{}, false
+	}
+	if value, ok := f.requestTokens.Load(opts); ok {
+		if record, ok := value.(requestToken); ok {
+			return record, true
+		}
+	}
+	return requestToken{}, false
+}
+
+func (f *Fs) markRequestRetried(opts *rest.Opts) {
+	record, ok := f.requestTokenUsed(opts)
+	if !ok {
+		return
+	}
+	record.retried = true
+	f.requestTokens.Store(opts, record)
 }
 
 func (f *Fs) forgetRequestToken(opts *rest.Opts) {
@@ -414,7 +476,7 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 	// Note: Error parsing is now handled within Call* methods based on API type
 	var apiErr *api.TokenError
 	if errors.As(err, &apiErr) {
-		// Token errors are handled by refreshTokenIfNecessary, don't retry here
+		// Token errors are handled by CallOpenAPI's conditional refresh path.
 		return false, err
 	}
 
@@ -529,18 +591,13 @@ func errorHandler(resp *http.Response) error {
 	bodyBytes, readErr := rest.ReadBody(resp) // Read body once
 	if readErr != nil {
 		fs.Debugf(nil, "Couldn't read error response body: %v", readErr)
-		// Fallback to status code if body read fails
-		return api.NewTokenError(fmt.Sprintf("HTTP error %d (%s)", resp.StatusCode, resp.Status))
+		return fmt.Errorf("read HTTP error %d (%s): %w", resp.StatusCode, resp.Status, readErr)
 	}
 
 	decodeErr := json.Unmarshal(bodyBytes, &openAPIErr)
 	if decodeErr == nil && !openAPIErr.State {
 		// Successfully decoded as OpenAPI error
 		err := openAPIErr.Err()
-		// Check for specific token-related errors
-		if openAPIErr.ErrCode() == 401 || openAPIErr.ErrCode() == 100001 || strings.Contains(openAPIErr.ErrMsg(), "token") { // Example codes
-			return api.NewTokenError(err.Error(), true) // Assume token error needs refresh/relogin
-		}
 		return err
 	}
 
@@ -554,7 +611,7 @@ func errorHandler(resp *http.Response) error {
 
 	// Fallback if JSON decoding fails or state is true (but status code != 2xx)
 	fs.Debugf(nil, "Couldn't decode error response: %v. Body: %s", decodeErr, string(bodyBytes))
-	return api.NewTokenError(fmt.Sprintf("HTTP error %d (%s): %s", resp.StatusCode, resp.Status, string(bodyBytes)))
+	return fmt.Errorf("HTTP error %d (%s): %s", resp.StatusCode, resp.Status, string(bodyBytes))
 }
 
 // generatePKCE generates a code_verifier and code_challenge
@@ -784,201 +841,11 @@ func (f *Fs) exchangeDeviceCodeForToken(ctx context.Context, loginUID string) er
 	f.accessToken = tokenResp.Data.AccessToken
 	f.refreshToken = tokenResp.Data.RefreshToken
 	f.tokenExpiry = now.Add(lifetime)
-	f.tokenRefreshLead = computeRefreshLead(lifetime)
-	f.notifyTokenRenewerLocked()
 	f.tokenMu.Unlock()
 
-	fs.Debugf(f, "Successfully obtained access token, expires at %v (refresh lead %v)", f.tokenExpiry, f.tokenRefreshLead)
+	fs.Debugf(f, "Successfully obtained access token, expires at %v", f.tokenExpiry)
 
 	return nil
-}
-
-// refreshTokenIfNecessary refreshes the token if necessary
-func (f *Fs) refreshTokenIfNecessary(ctx context.Context, refreshTokenExpired bool, forceRefresh bool) error {
-	f.tokenMu.Lock()
-	if f.tokenCond == nil {
-		f.tokenCond = sync.NewCond(&f.tokenMu)
-	}
-
-	for f.tokenRefreshing {
-		prevRefreshToken := f.refreshToken
-		prevAccessToken := f.accessToken
-		prevExpiry := f.tokenExpiry
-		fs.Debugf(f, "Token refresh already in progress, waiting")
-		f.tokenCond.Wait()
-		if f.refreshToken != prevRefreshToken || f.accessToken != prevAccessToken || !f.tokenExpiry.Equal(prevExpiry) {
-			refreshTokenExpired = false
-			forceRefresh = false
-		}
-		if !forceRefresh && isTokenStillValid(f) {
-			fs.Debugf(f, "Token became valid while waiting for existing refresh")
-			f.tokenMu.Unlock()
-			return nil
-		}
-	}
-
-	if !refreshTokenExpired && isTokenStillValid(f) {
-		if !forceRefresh {
-			fs.Debugf(f, "Token is still valid after acquiring lock, skipping refresh")
-			f.tokenMu.Unlock()
-			return nil
-		}
-	}
-
-	if shouldPerformFullLogin(f, refreshTokenExpired) {
-		f.tokenMu.Unlock()
-		err := f.login(ctx)
-		if err != nil {
-			return err
-		}
-		f.saveToken(ctx, f.m)
-		return nil
-	}
-
-	f.tokenRefreshing = true
-	refreshToken := f.refreshToken
-	f.tokenMu.Unlock()
-
-	result, err := f.performTokenRefresh(ctx, refreshToken)
-
-	f.tokenMu.Lock()
-	f.tokenRefreshing = false
-	if err == nil {
-		f.updateTokensLocked(result)
-	}
-	f.tokenCond.Broadcast()
-	f.tokenMu.Unlock()
-
-	if err != nil {
-		return err
-	}
-
-	f.saveToken(ctx, f.m)
-
-	return nil
-}
-
-// shouldPerformFullLogin determines if we should skip refresh and do a full login
-func shouldPerformFullLogin(f *Fs, refreshTokenExpired bool) bool {
-	// Skip directly to re-login if refresh token expired
-	if refreshTokenExpired {
-		fs.Debugf(f, "Token refresh skipped, going directly to re-login due to expired refresh token")
-		return true
-	}
-
-	// Re-login if no tokens available
-	if f.accessToken == "" || f.refreshToken == "" {
-		fs.Debugf(f, "No token found, attempting login.")
-		return true
-	}
-
-	return false
-}
-
-// isTokenStillValid checks if the current token is still valid
-func computeRefreshLead(lifetime time.Duration) time.Duration {
-	if lifetime <= 0 {
-		return 0
-	}
-
-	lead := defaultTokenRefreshWindow
-	if lifetime <= lead {
-		lead = lifetime / 2
-	}
-
-	if lifetime > minTokenRefreshWindow && lead < minTokenRefreshWindow {
-		lead = minTokenRefreshWindow
-	}
-
-	if lead >= lifetime {
-		lead = lifetime / 2
-		if lead < 0 {
-			lead = 0
-		}
-	}
-
-	return lead
-}
-
-func (f *Fs) refreshLead() time.Duration {
-	lead := f.tokenRefreshLead
-	if lead <= 0 {
-		return 0
-	}
-	remaining := time.Until(f.tokenExpiry)
-	if remaining <= 0 {
-		return 0
-	}
-	if lead >= remaining {
-		return computeRefreshLead(remaining)
-	}
-	return lead
-}
-
-func (f *Fs) shouldRefreshTokens() bool {
-	if f.tokenExpiry.IsZero() {
-		return true
-	}
-
-	now := time.Now()
-	if !now.Before(f.tokenExpiry) {
-		return true
-	}
-
-	lead := f.refreshLead()
-	if lead <= 0 {
-		return false
-	}
-
-	return !now.Before(f.tokenExpiry.Add(-lead))
-}
-
-func isTokenStillValid(f *Fs) bool {
-	return !f.shouldRefreshTokens()
-}
-
-// performTokenRefresh handles the actual API call to refresh the token
-func (f *Fs) performTokenRefresh(ctx context.Context, refreshToken string) (*api.RefreshTokenResp, error) {
-	// Ensure client exists
-	if err := f.ensureOpenAPIClient(ctx); err != nil {
-		return nil, err
-	}
-
-	// Set up and make the refresh request
-	refreshResp, err := f.callRefreshTokenAPI(ctx, refreshToken)
-	if err != nil {
-		return handleRefreshError(f, ctx, err)
-	}
-
-	// Validate the response
-	if refreshResp.Data == nil || refreshResp.Data.AccessToken == "" {
-		// Log detailed information about the empty response
-		fs.Errorf(f, "Refresh token response empty or invalid. Full response: %#v", refreshResp)
-		// Log OpenAPI base information (state, code, message)
-		fs.Errorf(f, "Response state: %v, code: %d, message: %q",
-			refreshResp.State, refreshResp.Code, refreshResp.Message)
-
-		fs.Errorf(f, "Refresh token response empty, attempting re-login.")
-
-		// Re-lock before checking token again to avoid race condition
-		f.tokenMu.Lock()
-		// Check if another thread has already refreshed the token
-		if f.accessToken != "" && time.Now().Before(f.tokenExpiry) {
-			fs.Debugf(f, "Token was refreshed by another thread while waiting")
-			f.tokenMu.Unlock()
-			return nil, nil
-		}
-		f.tokenMu.Unlock()
-
-		loginErr := f.login(ctx)
-		if loginErr != nil {
-			return nil, fmt.Errorf("re-login failed after empty refresh response: %w", loginErr)
-		}
-		fs.Debugf(f, "Re-login successful after empty refresh response.")
-		return nil, nil // Re-login successful, no need to update tokens
-	}
-
-	return refreshResp, nil
 }
 
 // ensureOpenAPIClient ensures the OpenAPI client is initialized
@@ -998,22 +865,73 @@ func (f *Fs) ensureOpenAPIClient(ctx context.Context) error {
 	return nil
 }
 
+// exchangeRotatingToken exchanges one 115 refresh token through the durable
+// rotating-token protocol.
+func (f *Fs) exchangeRotatingToken(ctx context.Context, refreshToken string) (*oauth2.Token, error) {
+	if err := f.ensureOpenAPIClient(ctx); err != nil {
+		return nil, err
+	}
+	refreshResp, err := f.callRefreshTokenAPI(ctx, refreshToken)
+	if err != nil {
+		var tokenErr *api.TokenError
+		if errors.As(err, &tokenErr) && tokenErr.IsRefreshTokenExpired {
+			return nil, oauthutil.NewExchangeError(oauthutil.ExchangeFailureReauthenticationRequired, err)
+		}
+		return nil, oauthutil.ClassifyExchangeTransportError(err)
+	}
+	if err := refreshResp.Err(); err != nil {
+		var tokenErr *api.TokenError
+		if errors.As(err, &tokenErr) && tokenErr.IsRefreshTokenExpired {
+			return nil, oauthutil.NewExchangeError(oauthutil.ExchangeFailureReauthenticationRequired, err)
+		}
+		return nil, err
+	}
+	if refreshResp.Data == nil || refreshResp.Data.AccessToken == "" || refreshResp.Data.RefreshToken == "" || refreshResp.Data.ExpiresIn <= 0 {
+		return nil, errors.New("refresh token response is incomplete")
+	}
+	return &oauth2.Token{
+		AccessToken:  refreshResp.Data.AccessToken,
+		TokenType:    "Bearer",
+		RefreshToken: refreshResp.Data.RefreshToken,
+		Expiry:       time.Now().Add(time.Duration(refreshResp.Data.ExpiresIn) * time.Second),
+	}, nil
+}
+
+// setTokenCache keeps the legacy login fields in sync for the parts of the
+// backend that still need them during an explicit cookie login.
+func (f *Fs) setTokenCache(token *oauth2.Token) {
+	if token == nil {
+		return
+	}
+	f.tokenMu.Lock()
+	f.accessToken = token.AccessToken
+	f.refreshToken = token.RefreshToken
+	f.tokenExpiry = token.Expiry
+	f.tokenMu.Unlock()
+}
+
 // callRefreshTokenAPI makes the actual API call to refresh the token
 func (f *Fs) callRefreshTokenAPI(ctx context.Context, refreshToken string) (*api.RefreshTokenResp, error) {
 	refreshData := url.Values{
 		"refresh_token": {refreshToken},
 	}
 	opts := rest.Opts{
-		Method:       "POST",
-		RootURL:      passportRootURL,
-		Path:         "/open/refreshToken",
-		Body:         strings.NewReader(refreshData.Encode()),
+		Method:     "POST",
+		RootURL:    passportRootURL,
+		Path:       "/open/refreshToken",
+		Body:       strings.NewReader(refreshData.Encode()),
+		NoRedirect: true,
+		// A single-hop fresh connection keeps dial and TLS failures pre-request.
+		Close:        true,
 		ExtraHeaders: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
 	}
 
 	var refreshResp api.RefreshTokenResp
 	resp, err := f.openAPIClient.Call(ctx, &opts)
 	if err != nil {
+		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			return nil, api.NewTokenError(err.Error(), true)
+		}
 		return nil, err
 	}
 
@@ -1038,144 +956,47 @@ func (f *Fs) callRefreshTokenAPI(ctx context.Context, refreshToken string) (*api
 	return &refreshResp, nil
 }
 
-// handleRefreshError handles errors from the refresh token API call
-func handleRefreshError(f *Fs, ctx context.Context, err error) (*api.RefreshTokenResp, error) {
-	fs.Errorf(f, "Refresh token failed: %v", err)
-
-	// Check if the error indicates the refresh token itself is expired
-	var tokenErr *api.TokenError
-	if errors.As(err, &tokenErr) && tokenErr.IsRefreshTokenExpired ||
-		strings.Contains(err.Error(), "refresh token expired") {
-		fs.Debugf(f, "Refresh token seems expired, attempting full re-login.")
-		loginErr := f.login(ctx) // login handles its own locking
-		if loginErr != nil {
-			return nil, fmt.Errorf("re-login failed after refresh token expired: %w", loginErr)
-		}
-		fs.Debugf(f, "Re-login successful after refresh token expiry.")
-		return nil, nil // Re-login successful
-	}
-
-	// Return the original refresh error if it wasn't an expiry issue
-	return nil, fmt.Errorf("token refresh failed: %w", err)
-}
-
-// updateTokensLocked updates tokens assuming the caller already holds tokenMu
-func (f *Fs) updateTokensLocked(refreshResp *api.RefreshTokenResp) {
-	if refreshResp == nil || refreshResp.Data == nil {
-		return
-	}
-
-	now := time.Now()
-	lifetime := time.Duration(refreshResp.Data.ExpiresIn) * time.Second
-	f.accessToken = refreshResp.Data.AccessToken
-	// OpenAPI spec says refresh_token might be updated, so store the new one
-	if refreshResp.Data.RefreshToken != "" {
-		f.refreshToken = refreshResp.Data.RefreshToken
-	}
-	f.tokenExpiry = now.Add(lifetime)
-	f.tokenRefreshLead = computeRefreshLead(lifetime)
-	f.notifyTokenRenewerLocked()
-	fs.Debugf(f, "Token refreshed successfully, new expiry: %v (refresh lead %v)", f.tokenExpiry, f.tokenRefreshLead)
-}
-
-// updateTokens updates the token values with new values from a refresh response
-func (f *Fs) updateTokens(refreshResp *api.RefreshTokenResp) {
-	if refreshResp == nil {
-		return
-	}
-
+// loggedInToken returns the complete credential obtained by device login.
+func (f *Fs) loggedInToken() (*oauth2.Token, error) {
 	f.tokenMu.Lock()
 	defer f.tokenMu.Unlock()
-
-	f.updateTokensLocked(refreshResp)
-}
-
-// saveToken saves the current token to the config
-func (f *Fs) saveToken(ctx context.Context, m configmap.Mapper) {
-	if m == nil {
-		fs.Debugf(f, "Not saving tokens - nil mapper provided")
-		return
-	}
-
-	f.tokenMu.Lock()
-	defer f.tokenMu.Unlock()
-
 	if f.accessToken == "" || f.refreshToken == "" || f.tokenExpiry.IsZero() {
-		fs.Debugf(f, "Not saving tokens - incomplete token information")
-		return
+		return nil, errors.New("device authorization returned incomplete token information")
 	}
-
-	// Create the token structure
-	token := &oauth2.Token{
+	return &oauth2.Token{
 		AccessToken:  f.accessToken,
 		TokenType:    "Bearer",
 		RefreshToken: f.refreshToken,
 		Expiry:       f.tokenExpiry,
+	}, nil
+}
+
+// saveToken saves the initial cookie-login token to persistent config.
+func (f *Fs) saveToken(ctx context.Context, m configmap.Mapper) error {
+	if m == nil {
+		return errors.New("not saving token with a nil config mapper")
 	}
 
-	// Save the token directly using oauthutil's method
-	// Note: This uses the originalName without brackets to ensure consistency
-	err := oauthutil.PutToken(f.originalName, m, token, false)
+	token, err := f.loggedInToken()
 	if err != nil {
-		fs.Errorf(f, "Failed to save token to config: %v", err)
-		return
+		return err
 	}
 
-	fs.Debugf(f, "Saved token to config file using original name %q", f.originalName)
+	err = oauthutil.PutRotatingToken(ctx, f.name, m, token)
+	if err != nil {
+		return fmt.Errorf("save rotating token: %w", err)
+	}
+
+	fs.Debugf(f, "Saved rotating token to persistent config")
+	return nil
 }
 
 // setupTokenRenewer initializes the token renewer to automatically refresh tokens
-func (f *Fs) setupTokenRenewer(ctx context.Context, m configmap.Mapper) {
-	// Only set up renewer if we have valid tokens
-	if f.accessToken == "" || f.refreshToken == "" || f.tokenExpiry.IsZero() {
-		fs.Debugf(f, "Not setting up token renewer - incomplete token information")
+func (f *Fs) setupTokenRenewer(ctx context.Context) {
+	if f.rotatingToken == nil {
 		return
 	}
-
-	// Create a renewal transaction function
-	transaction := func() error {
-		fs.Debugf(f, "Token renewer triggered, refreshing token")
-		// Use non-global function to avoid deadlocks
-		err := f.refreshTokenIfNecessary(ctx, false, true)
-		if err != nil {
-			fs.Errorf(f, "Failed to refresh token in renewer: %v", err)
-			return err
-		}
-
-		return nil // saveToken is already called in refreshTokenIfNecessary
-	}
-
-	// Create minimal OAuth config
-	config := &oauthutil.Config{
-		TokenURL: passportRootURL + "/open/refreshToken",
-	}
-
-	// Create a token source using the existing token
-	token := &oauth2.Token{
-		AccessToken:  f.accessToken,
-		RefreshToken: f.refreshToken,
-		Expiry:       f.tokenExpiry,
-		TokenType:    "Bearer",
-	}
-
-	// Save token to config so it can be accessed by TokenSource
-	err := oauthutil.PutToken(f.originalName, m, token, false)
-	if err != nil {
-		fs.Logf(f, "Failed to save token for renewer: %v", err)
-		return
-	}
-
-	// Create a client with the token source
-	_, ts, err := oauthutil.NewClientWithBaseClient(ctx, f.originalName, m, config, fshttp.NewClient(ctx))
-	if err != nil {
-		fs.Logf(f, "Failed to create token source for renewer: %v", err)
-		return
-	}
-
-	// Create token renewer that will trigger when the token is about to expire
-	f.tokenRenewer = oauthutil.NewRenew(f.originalName, ts, transaction)
-	f.tokenRenewer.Start() // Start the renewer immediately
-	fs.Debugf(f, "Token renewer initialized and started with original name %q", f.originalName)
+	f.tokenRenewer = oauthutil.NewRotatingRenew(ctx, f.name, f.rotatingToken)
 }
 
 // CallOpenAPI performs a call to the OpenAPI endpoint.
@@ -1236,35 +1057,20 @@ func (f *Fs) CallOpenAPI(ctx context.Context, opts *rest.Opts, request any, resp
 
 // prepareTokenForRequest ensures a valid token is available and sets it in the request headers
 func (f *Fs) prepareTokenForRequest(ctx context.Context, opts *rest.Opts) error {
-	// First check if we need to refresh the token
-	refreshNeeded := false
-
-	f.tokenMu.Lock()
-	if !isTokenStillValid(f) {
-		refreshNeeded = true
+	if f.rotatingToken == nil {
+		return errors.New("rotating token source is not initialized")
 	}
-	f.tokenMu.Unlock()
-
-	// If refresh is needed, do it outside the lock
-	if refreshNeeded {
-		refreshErr := f.refreshTokenIfNecessary(ctx, false, false)
-		if refreshErr != nil {
-			fs.Debugf(f, "Token refresh check failed: %v", refreshErr)
-			return fmt.Errorf("token refresh check failed: %w", refreshErr)
-		}
+	token, generation, err := f.rotatingToken.TokenContext(ctx)
+	if err != nil {
+		return fmt.Errorf("token refresh check failed: %w", err)
 	}
-
-	// Always get the freshest token right before using it
-	f.tokenMu.Lock()
-	token := f.accessToken
-	f.tokenMu.Unlock()
-
-	f.rememberRequestToken(opts, token)
+	f.setTokenCache(token)
+	f.rememberRequestToken(opts, token.AccessToken, generation)
 
 	if opts.ExtraHeaders == nil {
 		opts.ExtraHeaders = make(map[string]string)
 	}
-	opts.ExtraHeaders["Authorization"] = "Bearer " + token
+	opts.ExtraHeaders["Authorization"] = "Bearer " + token.AccessToken
 	return nil
 }
 
@@ -1287,57 +1093,45 @@ func (f *Fs) executeOpenAPICall(ctx context.Context, opts *rest.Opts, request an
 	}
 }
 
-// handleTokenError processes token-related errors and attempts to refresh or re-login
+// handleTokenError processes token-related errors and conditionally refreshes
+// only the generation that made the failed request.
 func (f *Fs) handleTokenError(ctx context.Context, opts *rest.Opts, apiErr error, skipToken bool) (bool, error) {
 	var tokenErr *api.TokenError
-	if errors.As(apiErr, &tokenErr) {
-		fs.Debugf(f, "Token error detected: %v (relogin needed: %v)", tokenErr, tokenErr.IsRefreshTokenExpired)
-
-		// If another goroutine already rotated the token since this request started, just retry with the new token.
-		if !tokenErr.IsRefreshTokenExpired {
-			if tokenUsed, ok := f.requestTokenUsed(opts); ok {
-				f.tokenMu.Lock()
-				currentToken := f.accessToken
-				f.tokenMu.Unlock()
-				if currentToken != "" && currentToken != tokenUsed {
-					fs.Debugf(f, "Token already refreshed by another request, retrying without additional refresh")
-					if !skipToken {
-						if opts.ExtraHeaders == nil {
-							opts.ExtraHeaders = make(map[string]string)
-						}
-						opts.ExtraHeaders["Authorization"] = "Bearer " + currentToken
-						f.rememberRequestToken(opts, currentToken)
-					}
-					return true, nil
-				}
-			}
-		}
-
-		// Handle token refresh/re-login using refreshTokenIfNecessary
-		refreshErr := f.refreshTokenIfNecessary(ctx, tokenErr.IsRefreshTokenExpired, !tokenErr.IsRefreshTokenExpired)
-		if refreshErr != nil {
-			fs.Debugf(f, "Token refresh/relogin failed: %v", refreshErr)
-			return false, fmt.Errorf("token refresh/relogin failed: %w (original: %v)", refreshErr, apiErr)
-		}
-
-		// Token was successfully refreshed or re-login succeeded, retry the API call
-		fs.Debugf(f, "Token refresh/relogin succeeded, retrying API call")
-
-		// Update the Authorization header with the new token
-		if !skipToken {
-			// Always get the freshest token right before using it
-			f.tokenMu.Lock()
-			token := f.accessToken
-			f.tokenMu.Unlock()
-
-			if opts.ExtraHeaders == nil {
-				opts.ExtraHeaders = make(map[string]string)
-			}
-			opts.ExtraHeaders["Authorization"] = "Bearer " + token
-		}
-		return true, nil // Signal retry with the refreshed token
+	if !errors.As(apiErr, &tokenErr) {
+		return false, nil
 	}
-	return false, nil // Not a token error
+	if skipToken || f.rotatingToken == nil {
+		return false, apiErr
+	}
+	record, ok := f.requestTokenUsed(opts)
+	if !ok {
+		return false, fmt.Errorf("token error has no request generation: %w", apiErr)
+	}
+	if record.retried {
+		return false, fmt.Errorf("token remains rejected after one conditional refresh: %w", apiErr)
+	}
+
+	var (
+		token      *oauth2.Token
+		generation uint64
+		err        error
+	)
+	if tokenErr.IsRefreshTokenExpired {
+		token, generation, err = f.rotatingToken.MarkReauthenticationRequiredIfCurrent(ctx, record.generation)
+	} else {
+		token, generation, err = f.rotatingToken.RefreshIfCurrent(ctx, record.generation)
+	}
+	if err != nil {
+		return false, fmt.Errorf("conditional token handling failed: %w (original: %v)", err, apiErr)
+	}
+	f.setTokenCache(token)
+	if opts.ExtraHeaders == nil {
+		opts.ExtraHeaders = make(map[string]string)
+	}
+	opts.ExtraHeaders["Authorization"] = "Bearer " + token.AccessToken
+	f.rememberRequestToken(opts, token.AccessToken, generation)
+	f.markRequestRetried(opts)
+	return true, nil
 }
 
 // checkResponseForAPIErrors examines the response for API-level errors using reflection
@@ -1551,7 +1345,7 @@ func (f *Fs) processTraditionalAPIResult(ctx context.Context, resp *http.Respons
 	return false, nil
 }
 
-// newFs constructs an Fs from the path, container:path
+// NewFs constructs an Fs from the path, container:path.
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
 	opt := new(Options)
@@ -1585,13 +1379,6 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		opt.NohashSize = StreamUploadLimit
 	}
 
-	// Store the original name before any modifications for config operations
-	// Extract the base name without the config override suffix {xxxx}
-	originalName := name
-	if idx := strings.IndexRune(name, '{'); idx > 0 {
-		originalName = name[:idx]
-	}
-
 	// Parse root ID from path if present
 	if rootID, _, _ := parseRootID(root); rootID != "" {
 		name += rootID // Append ID to name for uniqueness
@@ -1601,14 +1388,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	root = strings.Trim(root, "/")
 
 	f := &Fs{
-		name:         name,
-		originalName: originalName,
-		root:         root,
-		opt:          *opt,
-		m:            m,
+		name: name,
+		root: root,
+		opt:  *opt,
 	}
-
-	f.tokenCond = sync.NewCond(&f.tokenMu)
 
 	// Initialize features
 	f.features = (&fs.Features{
@@ -1659,50 +1442,22 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		SetRoot(openAPIRootURL).
 		SetErrorHandler(errorHandler)
 
-	// Check if we have saved token in config file
-	tokenLoaded := loadTokenFromConfig(f, m)
-	fs.Debugf(f, "Token loaded from config: %v (expires at %v)", tokenLoaded, f.tokenExpiry)
-
-	var tokenRefreshNeeded bool
-	if tokenLoaded {
-		// Check if token is expired or will expire soon
-		if f.shouldRefreshTokens() {
-			fs.Debugf(f, "Token expired or approaching refresh window (%v), refreshing now", f.refreshLead())
-			tokenRefreshNeeded = true
-		}
-	} else if f.opt.Cookie != "" {
-		// No token but have cookie, so login
-		fs.Debugf(f, "No token found but cookie provided, attempting login")
-		err = f.login(ctx)
-		if err != nil {
+	rotatingToken, tokenErr := oauthutil.NewRotatingTokenSource(ctx, name, m, f.exchangeRotatingToken)
+	if errors.Is(tokenErr, oauthutil.ErrNoPersistentToken) && f.opt.Cookie != "" {
+		fs.Debugf(f, "No persistent token found, obtaining one from the configured cookie")
+		if err = f.login(ctx); err != nil {
 			return nil, fmt.Errorf("initial login failed: %w", err)
 		}
-		// Save token to config after successful login
-		f.saveToken(ctx, m)
-		fs.Debugf(f, "Login successful, token saved")
-	} else {
-		return nil, errors.New("no valid cookie or token found, please configure cookie")
-	}
-
-	// Try to refresh the token if needed
-	if tokenRefreshNeeded {
-		err = f.refreshTokenIfNecessary(ctx, false, true)
-		if err != nil {
-			fs.Debugf(f, "Token refresh failed, attempting full login: %v", err)
-			// If refresh fails, try full login
-			err = f.login(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("login failed after token refresh failure: %w", err)
-			}
+		if err = f.saveToken(ctx, m); err != nil {
+			return nil, err
 		}
-		// Save the refreshed/new token
-		f.saveToken(ctx, m)
-		fs.Debugf(f, "Token refresh/login successful, token saved")
+		rotatingToken, tokenErr = oauthutil.NewRotatingTokenSource(ctx, name, m, f.exchangeRotatingToken)
 	}
-
-	// Setup token renewer for automatic refresh
-	fs.Debugf(f, "Setting up token renewer")
-	f.setupTokenRenewer(ctx, m)
+	if tokenErr != nil {
+		return nil, fmt.Errorf("115 token: %w", tokenErr)
+	}
+	f.rotatingToken = rotatingToken
+	f.setupTokenRenewer(ctx)
 
 	// Set the root folder ID based on config
 	if f.opt.RootFolderID != "" {
@@ -1723,29 +1478,28 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		if err != nil {
 			// Assume it is a file or doesn't exist
 			newRoot, remote := dircache.SplitPath(f.root)
-			tempF := *f
-			tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
-			tempF.root = newRoot
+			oldRoot, oldDirCache := f.root, f.dirCache
+			f.root = newRoot
+			f.dirCache = dircache.New(newRoot, f.rootFolderID, f)
 			// Make new Fs which is the parent
-			err = tempF.dirCache.FindRoot(ctx, false)
+			err = f.dirCache.FindRoot(ctx, false)
 			if err != nil {
 				// No root so return old f
+				f.root, f.dirCache = oldRoot, oldDirCache
 				return f, nil
 			}
 			// Check if it's a file
-			_, err := tempF.newObjectWithInfo(ctx, remote, nil)
+			_, err := f.newObjectWithInfo(ctx, remote, nil)
 			if err != nil {
+				f.root, f.dirCache = oldRoot, oldDirCache
 				if err == fs.ErrorObjectNotFound {
 					// File doesn't exist so return old f
 					return f, nil
 				}
 				return nil, err
 			}
-			// Copy the features
-			f.features.Fill(ctx, &tempF)
-			// Update the dir cache in the old f
-			f.dirCache = tempF.dirCache
-			f.root = tempF.root
+			// Rebind optional feature methods to the adjusted filesystem root.
+			f.features.Fill(ctx, f)
 			// Return an error with an fs which points to the parent
 			return f, fs.ErrorIsFile
 		}
@@ -1923,6 +1677,10 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 func (f *Fs) putUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, remote string, options ...fs.OpenOption) (fs.Object, error) {
 	if f.isShare {
 		return nil, errors.New("unsupported operation: Put on shared filesystem")
+	}
+	if f.tokenRenewer != nil {
+		f.tokenRenewer.Start()
+		defer f.tokenRenewer.Stop()
 	}
 
 	// Call the main upload function which handles different strategies
@@ -2764,12 +2522,6 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		return errors.New("refusing to update with unknown size")
 	}
 
-	// Start the token renewer if we have a valid one
-	if o.fs.tokenRenewer != nil {
-		o.fs.tokenRenewer.Start()
-		defer o.fs.tokenRenewer.Stop()
-	}
-
 	// Ensure metadata is read for the existing object
 	err := o.readMetaData(ctx)
 	if err != nil {
@@ -2948,37 +2700,3 @@ var (
 	_ fs.ParentIDer      = (*Object)(nil)
 	_ fs.Shutdowner      = (*Fs)(nil)
 )
-
-// loadTokenFromConfig attempts to load and parse tokens from the config file
-func loadTokenFromConfig(f *Fs, m configmap.Mapper) bool {
-	// Try to load the token using oauthutil's method instead of
-	// directly accessing the config file
-	token, err := oauthutil.GetToken(f.originalName, m)
-	if err != nil {
-		fs.Debugf(f, "Failed to get token from config: %v", err)
-		return false
-	}
-
-	if token == nil || token.AccessToken == "" || token.RefreshToken == "" {
-		fs.Debugf(f, "Token from config is incomplete")
-		return false
-	}
-
-	// Extract token components
-	f.accessToken = token.AccessToken
-	f.refreshToken = token.RefreshToken
-	f.tokenExpiry = token.Expiry
-	remaining := time.Until(f.tokenExpiry)
-	if remaining < 0 {
-		remaining = 0
-	}
-	f.tokenRefreshLead = computeRefreshLead(remaining)
-
-	// Check if we got valid token data
-	if f.accessToken == "" || f.refreshToken == "" {
-		return false
-	}
-
-	fs.Debugf(f, "Loaded token from config file, expires at %v (refresh lead %v)", f.tokenExpiry, f.tokenRefreshLead)
-	return true
-}

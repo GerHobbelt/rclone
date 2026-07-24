@@ -3,6 +3,7 @@ package config
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,8 +13,10 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/mitchellh/go-homedir"
 
 	"github.com/rclone/rclone/fs"
@@ -120,6 +123,13 @@ var (
 	cacheDir   string
 	data       Storage
 	dataLoaded bool
+
+	configLocks = struct {
+		sync.Mutex
+		locks map[string]chan struct{}
+	}{
+		locks: make(map[string]chan struct{}),
+	}
 )
 
 func init() {
@@ -388,7 +398,12 @@ func SaveConfig() {
 	ci := fs.GetConfig(ctx)
 	var err error
 	for range ci.LowLevelRetries + 1 {
-		if err = LoadedData().Save(); err == nil {
+		if configPath == "" {
+			err = LoadedData().Save()
+		} else {
+			err = FileTransaction(ctx, func() error { return nil })
+		}
+		if err == nil {
 			return
 		}
 		waitingTimeMs := mathrand.Intn(1000)
@@ -440,11 +455,195 @@ func GetValue(remote, key string) string {
 // value in the config file.  It loads the old config file in from
 // disk first and overwrites the given value only.
 func SetValueAndSave(remote, key, value string) error {
-	// Set the value in config in case we fail to reload it
-	FileSetValue(remote, key, value)
-	// Save it again
-	SaveConfig()
+	if configPath == "" {
+		// Keep the in-memory configuration behavior used by no-config remotes.
+		FileSetValue(remote, key, value)
+		SaveConfig()
+		return nil
+	}
+	return FileTransaction(context.Background(), func() error {
+		FileSetValue(remote, key, value)
+		return nil
+	})
+}
+
+// FileTransaction runs fn against the current config and saves its changes as
+// one cross-process transaction.
+//
+// The transaction reloads the config after acquiring a stable sidecar lock, so
+// fn must make all of its config mutations through the config package. The
+// callback must not call FileTransaction or SaveConfig.
+func FileTransaction(ctx context.Context, fn func() error) (err error) {
+	if fn == nil {
+		return errors.New("configuration transaction callback is nil")
+	}
+
+	lockPath, err := configCommitLockPath(configPath)
+	if err != nil {
+		return err
+	}
+	unlock, err := lockConfigFile(ctx, lockPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if unlockErr := unlock(); unlockErr != nil && err == nil {
+			err = unlockErr
+		}
+	}()
+
+	storage := LoadedData()
+	if loadErr := storage.Load(); loadErr != nil && !errors.Is(loadErr, ErrorConfigFileNotFound) {
+		return fmt.Errorf("failed to reload config for transaction: %w", loadErr)
+	}
+	if err := fn(); err != nil {
+		return err
+	}
+	if err := storage.Save(); err != nil {
+		return fmt.Errorf("failed to save config transaction: %w", err)
+	}
 	return nil
+}
+
+// FileReadTransaction runs fn against a strong, cross-process-consistent
+// config reload without saving. Callers which also modify config must use
+// FileTransaction instead.
+func FileReadTransaction(ctx context.Context, fn func() error) (err error) {
+	if fn == nil {
+		return errors.New("configuration transaction callback is nil")
+	}
+
+	lockPath, err := configCommitLockPath(configPath)
+	if err != nil {
+		return err
+	}
+	unlock, err := lockConfigFile(ctx, lockPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if unlockErr := unlock(); unlockErr != nil && err == nil {
+			err = unlockErr
+		}
+	}()
+
+	storage := LoadedData()
+	if loadErr := storage.Load(); loadErr != nil && !errors.Is(loadErr, ErrorConfigFileNotFound) {
+		return fmt.Errorf("failed to reload config for transaction: %w", loadErr)
+	}
+	return fn()
+}
+
+// LockConfigSection acquires the cross-process lock for section in the current
+// config file. The caller must release the returned function after it has
+// finished using a rotating credential from that section.
+func LockConfigSection(ctx context.Context, section string) (unlock func() error, err error) {
+	if section == "" {
+		return nil, errors.New("configuration section is empty")
+	}
+	lockPath, err := configSectionLockPath(configPath, section)
+	if err != nil {
+		return nil, err
+	}
+	return lockConfigFile(ctx, lockPath)
+}
+
+// lockConfigFile acquires a process-local and cross-process lock for lockPath.
+func lockConfigFile(ctx context.Context, lockPath string) (unlock func() error, err error) {
+	ctx, cancel := configLockContext(ctx)
+	defer cancel()
+	if err := file.MkdirAll(filepath.Dir(lockPath), os.ModePerm); err != nil {
+		return nil, fmt.Errorf("failed to create config transaction lock directory: %w", err)
+	}
+
+	releaseProcessLock, err := lockConfigProcess(ctx, lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire config transaction lock: %w", err)
+	}
+	lock := flock.New(lockPath, flock.SetPermissions(0o600))
+	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
+	if err != nil || !locked {
+		releaseProcessLock()
+		if err != nil {
+			return nil, fmt.Errorf("failed to acquire config transaction lock: %w", err)
+		}
+		return nil, errors.New("failed to acquire config transaction lock")
+	}
+
+	var once sync.Once
+	return func() (unlockErr error) {
+		once.Do(func() {
+			unlockErr = lock.Close()
+			releaseProcessLock()
+		})
+		if unlockErr != nil {
+			return fmt.Errorf("failed to release config transaction lock: %w", unlockErr)
+		}
+		return nil
+	}, nil
+}
+
+// configLockContext returns a context with the default rclone timeout when the
+// caller did not provide a deadline.
+func configLockContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, func() {}
+	}
+	timeout := time.Duration(fs.GetConfig(ctx).Timeout)
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+// lockConfigProcess serializes lockPath within this process because advisory
+// file-lock behavior for independent descriptors is platform dependent.
+func lockConfigProcess(ctx context.Context, lockPath string) (func(), error) {
+	configLocks.Lock()
+	lock, found := configLocks.locks[lockPath]
+	if !found {
+		lock = make(chan struct{}, 1)
+		configLocks.locks[lockPath] = lock
+	}
+	configLocks.Unlock()
+
+	select {
+	case lock <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() { <-lock })
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// configCommitLockPath returns a stable lock file next to configPath.
+func configCommitLockPath(configPath string) (string, error) {
+	if configPath == "" {
+		return "", errors.New("configuration is not persistent")
+	}
+	resolvedPath, err := filepath.EvalSymlinks(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to resolve config path for transaction lock: %w", err)
+	}
+	if resolvedPath == "" {
+		resolvedPath = configPath
+	}
+	return resolvedPath + ".lock", nil
+}
+
+// configSectionLockPath returns a stable lock file for one config section.
+func configSectionLockPath(configPath, section string) (string, error) {
+	configLockPath, err := configCommitLockPath(configPath)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(section))
+	return fmt.Sprintf("%s.token-%x", configLockPath, sum[:]), nil
 }
 
 // Remote defines a remote with a name, type, source and description
@@ -575,6 +774,11 @@ func updateRemote(ctx context.Context, name string, keyValues rc.Params, opt Upd
 		if strings.ContainsAny(k, "\n\r") || strings.ContainsAny(vStr, "\n\r") {
 			return nil, fmt.Errorf("update remote: invalid key or value contains \\n or \\r")
 		}
+		if k == ConfigToken {
+			if currentToken, found := FileGetValue(name, ConfigToken); found && IsManagedRotatingToken(currentToken) {
+				return nil, fmt.Errorf("update remote: rotating token is managed by its backend; run \"rclone config reconnect %s:\"", name)
+			}
+		}
 		// Obscure parameter if necessary
 		if _, ok := needsObscure[k]; ok {
 			_, err := obscure.Reveal(vStr)
@@ -625,6 +829,19 @@ func updateRemote(ctx context.Context, name string, keyValues rc.Params, opt Upd
 	SaveConfig()
 	cache.ClearConfig(name) // remove any remotes based on this config from the cache
 	return out, nil
+}
+
+// IsManagedRotatingToken reports whether token carries transaction metadata
+// owned by a rotating-token backend.
+func IsManagedRotatingToken(token string) bool {
+	var stored struct {
+		State *struct {
+		} `json:"rclone_token_state"`
+	}
+	if json.Unmarshal([]byte(token), &stored) != nil || stored.State == nil {
+		return false
+	}
+	return true
 }
 
 // UpdateRemote adds the keyValues passed in to the remote of name.
@@ -685,6 +902,11 @@ func UnsetRemote(name string, keys ...string) (removed []string, err error) {
 	for _, key := range keys {
 		if key == "type" {
 			return nil, errors.New(`can't unset the "type" of a remote - use "config delete" to remove the whole remote`)
+		}
+		if key == ConfigToken {
+			if currentToken, found := FileGetValue(name, ConfigToken); found && IsManagedRotatingToken(currentToken) {
+				return nil, fmt.Errorf("unset remote: rotating token is managed by its backend; run \"rclone config reconnect %s:\"", name)
+			}
 		}
 	}
 	for _, key := range keys {

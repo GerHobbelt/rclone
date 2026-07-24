@@ -23,9 +23,11 @@ func Install() {
 // Storage implements config.Storage for saving and loading config
 // data in a simple INI based file.
 type Storage struct {
-	mu sync.Mutex           // to protect the following variables
-	gc *goconfig.ConfigFile // config file loaded - not thread safe
-	fi os.FileInfo          // stat of the file when last loaded
+	mu              sync.Mutex           // to protect the following variables
+	gc              *goconfig.ConfigFile // config file loaded - not thread safe
+	fi              os.FileInfo          // stat of the file when last loaded
+	dirtyValues     map[string]map[string]*string
+	deletedSections map[string]struct{}
 }
 
 // Check to see if we need to reload the config
@@ -56,6 +58,7 @@ func (s *Storage) _load() (err error) {
 	defer func() {
 		if s.gc == nil {
 			s.gc, _ = goconfig.LoadFromReader(bytes.NewReader([]byte{}))
+			s.applyDirty()
 		}
 	}()
 
@@ -85,7 +88,11 @@ func (s *Storage) _load() (err error) {
 	if err != nil {
 		return err
 	}
+	if err := s.rejectManagedTokenOverwrite(gc); err != nil {
+		return err
+	}
 	s.gc = gc
+	s.applyDirty()
 
 	return nil
 }
@@ -201,6 +208,7 @@ func (s *Storage) Save() error {
 
 	// Update s.fi with the newly written file
 	s.fi, _ = os.Stat(configPath)
+	s.clearDirty()
 
 	return nil
 }
@@ -237,6 +245,11 @@ func (s *Storage) DeleteSection(section string) {
 
 	s._check()
 	s.gc.DeleteSection(section)
+	if s.deletedSections == nil {
+		s.deletedSections = make(map[string]struct{})
+	}
+	s.deletedSections[section] = struct{}{}
+	delete(s.dirtyValues, section)
 }
 
 // GetSectionList returns a slice of strings with names for all the
@@ -282,6 +295,7 @@ func (s *Storage) SetValue(section string, key string, value string) {
 		return
 	}
 	s.gc.SetValue(section, key, value)
+	s.markSet(section, key, value)
 }
 
 // DeleteKey removes the key under section
@@ -290,7 +304,94 @@ func (s *Storage) DeleteKey(section string, key string) bool {
 	defer s.mu.Unlock()
 
 	s._check()
-	return s.gc.DeleteKey(section, key)
+	deleted := s.gc.DeleteKey(section, key)
+	if deleted {
+		s.markDelete(section, key)
+	}
+	return deleted
+}
+
+// markSet records a mutation which must survive a strong reload before Save.
+//
+// s.mu must be held when calling this.
+func (s *Storage) markSet(section, key, value string) {
+	if s.dirtyValues == nil {
+		s.dirtyValues = make(map[string]map[string]*string)
+	}
+	values := s.dirtyValues[section]
+	if values == nil {
+		values = make(map[string]*string)
+		s.dirtyValues[section] = values
+	}
+	valueCopy := value
+	values[key] = &valueCopy
+}
+
+// markDelete records a key removal which must survive a strong reload before
+// Save.
+//
+// s.mu must be held when calling this.
+func (s *Storage) markDelete(section, key string) {
+	if s.dirtyValues == nil {
+		s.dirtyValues = make(map[string]map[string]*string)
+	}
+	values := s.dirtyValues[section]
+	if values == nil {
+		values = make(map[string]*string)
+		s.dirtyValues[section] = values
+	}
+	values[key] = nil
+}
+
+// rejectManagedTokenOverwrite rejects a pending ordinary token write when the
+// durable config has acquired rotating-token transaction metadata meanwhile.
+//
+// s.mu must be held when calling this.
+func (s *Storage) rejectManagedTokenOverwrite(gc *goconfig.ConfigFile) error {
+	for section, values := range s.dirtyValues {
+		next, changed := values[config.ConfigToken]
+		if !changed {
+			continue
+		}
+		current, err := gc.GetValue(section, config.ConfigToken)
+		if err != nil || !config.IsManagedRotatingToken(current) {
+			continue
+		}
+		if next != nil && *next == current {
+			continue
+		}
+		return fmt.Errorf("rotating token for %q is managed by its backend; run \"rclone config reconnect %s:\"", section, section)
+	}
+	return nil
+}
+
+// applyDirty merges pending mutations into the most recently loaded config.
+//
+// s.mu must be held when calling this.
+func (s *Storage) applyDirty() {
+	if s.gc == nil {
+		return
+	}
+	for section := range s.deletedSections {
+		s.gc.DeleteSection(section)
+	}
+	for section, values := range s.dirtyValues {
+		for key, value := range values {
+			if value == nil {
+				s.gc.DeleteKey(section, key)
+				continue
+			}
+			s.gc.SetValue(section, key, *value)
+		}
+	}
+}
+
+// clearDirty clears mutations after they have been durably saved.
+//
+// s.mu must be held when calling this.
+func (s *Storage) clearDirty() {
+	s.dirtyValues = nil
+	s.deletedSections = nil
 }
 
 // Check the interface is satisfied

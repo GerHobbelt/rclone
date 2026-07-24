@@ -4,6 +4,7 @@ package all
 import (
 	// Active file systems
 	_ "github.com/rclone/rclone/backend/115"
+	_ "github.com/rclone/rclone/backend/123pan"
 	_ "github.com/rclone/rclone/backend/alias"
 	_ "github.com/rclone/rclone/backend/alist"
 	_ "github.com/rclone/rclone/backend/archive"

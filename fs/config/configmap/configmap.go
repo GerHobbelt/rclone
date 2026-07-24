@@ -41,11 +41,25 @@ type Mapper interface {
 	Setter
 }
 
+// PersistentMapper supplies the stable config section behind a Mapper. It is
+// used by credentials which must not be sourced from an ephemeral
+// configuration override.
+type PersistentMapper interface {
+	Mapper
+
+	// PersistentConfigName returns the config section that owns persistent data.
+	PersistentConfigName() string
+
+	// HasOverride reports whether a higher-priority getter supplies key.
+	HasOverride(key string) bool
+}
+
 // Map provides a wrapper around multiple Setter and
 // Getter interfaces.
 type Map struct {
-	setters []Setter
-	getters []getprio
+	setters        []Setter
+	getters        []getprio
+	persistentName string
 }
 
 type getprio struct {
@@ -70,6 +84,13 @@ func (c *Map) AddGetter(getter Getter, priority Priority) *Map {
 // AddSetter appends a setter onto the end of the setters
 func (c *Map) AddSetter(setter Setter) *Map {
 	c.setters = append(c.setters, setter)
+	return c
+}
+
+// SetPersistentConfigName records the section used for persistent config.
+// Normal calls to Get still use all configured getters by priority.
+func (c *Map) SetPersistentConfigName(name string) *Map {
+	c.persistentName = name
 	return c
 }
 
@@ -121,6 +142,20 @@ func (c *Map) Set(key, value string) {
 		do.Set(key, value)
 	}
 }
+
+// PersistentConfigName returns the section that owns persistent config.
+func (c *Map) PersistentConfigName() string {
+	return c.persistentName
+}
+
+// HasOverride reports whether a higher-priority getter supplies key.
+func (c *Map) HasOverride(key string) bool {
+	_, ok := c.GetPriority(key, PriorityNormal)
+	return ok
+}
+
+// Check the interface is satisfied.
+var _ PersistentMapper = (*Map)(nil)
 
 // Simple is a simple Mapper for testing
 type Simple map[string]string

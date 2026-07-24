@@ -135,7 +135,9 @@ func ConfigMap(prefix string, options Options, configName string, connectionStri
 
 	// config file
 	if configName != "" {
-		config.AddGetter(getConfigFile(configName), configmap.PriorityConfig)
+		persistent := getConfigFile(configName)
+		config.AddGetter(persistent, configmap.PriorityConfig)
+		config.SetPersistentConfigName(configName)
 	}
 
 	// default values
