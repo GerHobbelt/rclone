@@ -17,6 +17,7 @@ Improvements:
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,9 @@ const (
 	maxSleep      = 2 * time.Second
 	eventWaitTime = 500 * time.Millisecond
 	decayConstant = 2 // bigger for slower decay, exponential
+
+	sessionIDConfigKey = "session_id"
+	masterKeyConfigKey = "master_key"
 )
 
 var (
@@ -72,6 +76,20 @@ func init() {
 			Name:     "2fa",
 			Help:     `The 2FA code of your MEGA account if the account is set up with one`,
 			Required: false,
+		}, {
+			Name:      sessionIDConfigKey,
+			Help:      "Session (internal use only)",
+			Required:  false,
+			Advanced:  true,
+			Sensitive: true,
+			Hide:      fs.OptionHideBoth,
+		}, {
+			Name:      masterKeyConfigKey,
+			Help:      "Master key (internal use only)",
+			Required:  false,
+			Advanced:  true,
+			Sensitive: true,
+			Hide:      fs.OptionHideBoth,
 		}, {
 			Name: "debug",
 			Help: `Output more debug from Mega.
@@ -121,11 +139,21 @@ type Options struct {
 	User       string               `config:"user"`
 	Pass       string               `config:"pass"`
 	TwoFA      string               `config:"2fa"`
+	SessionID  string               `config:"session_id"`
+	MasterKey  string               `config:"master_key"`
 	Debug      bool                 `config:"debug"`
 	HardDelete bool                 `config:"hard_delete"`
 	UseHTTPS   bool                 `config:"use_https"`
 	Enc        encoder.MultiEncoder `config:"encoding"`
 	UseIPv6    bool                 `config:"use_ipv6"`
+}
+
+// sessionClient is implemented by go-mega versions that can export and
+// restore authenticated sessions without the account password.
+type sessionClient interface {
+	GetSessionID() string
+	GetMasterKey() []byte
+	LoginWithKeys(sessionID string, masterKey []byte) error
 }
 
 // Fs represents a remote mega
@@ -258,10 +286,31 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 			})
 		}
 
-		fs.Debugf(f, "Using username and password to initialize the Mega API")
-		err := srv.MultiFactorLogin(opt.User, opt.Pass, opt.TwoFA)
-		if err != nil {
-			return nil, fmt.Errorf("couldn't login: %w", err)
+		session, canReuseSession := any(srv).(sessionClient)
+		if opt.SessionID == "" || !canReuseSession {
+			if opt.SessionID != "" {
+				fs.Debugf(f, "The installed go-mega does not support session reuse; logging in with the account password")
+			}
+			fs.Debugf(f, "Using username and password to initialize the Mega API")
+			err := srv.MultiFactorLogin(opt.User, opt.Pass, opt.TwoFA)
+			if err != nil {
+				return nil, fmt.Errorf("couldn't login: %w", err)
+			}
+			if canReuseSession {
+				m.Set(sessionIDConfigKey, session.GetSessionID())
+				encodedMasterKey := base64.StdEncoding.EncodeToString(session.GetMasterKey())
+				m.Set(masterKeyConfigKey, encodedMasterKey)
+			}
+		} else {
+			fs.Debugf(f, "Using previously stored session ID and master key to initialize the Mega API")
+			decodedMasterKey, err := base64.StdEncoding.DecodeString(opt.MasterKey)
+			if err != nil {
+				return nil, fmt.Errorf("couldn't decode master key: %w", err)
+			}
+			err = session.LoginWithKeys(opt.SessionID, decodedMasterKey)
+			if err != nil {
+				return nil, fmt.Errorf("login with previous auth keys failed: %w", err)
+			}
 		}
 		// Cache the session so all Fs instances of this user share
 		// it - the move code relies on all objects being in the same
