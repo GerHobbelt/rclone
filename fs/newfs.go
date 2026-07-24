@@ -7,12 +7,15 @@ import (
 	"crypto/md5"
 	"encoding/base64"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/fspath"
 )
 
@@ -21,6 +24,22 @@ var (
 	overriddenConfigMu sync.Mutex
 	overriddenConfig   = make(map[string]string)
 )
+
+// rcRequestKey marks a context as created by a remote control (rc) request.
+type rcRequestKeyType struct{}
+
+var rcRequestKey = rcRequestKeyType{}
+
+// WithRCRequest marks ctx as created by a remote control (rc) request.
+func WithRCRequest(ctx context.Context) context.Context {
+	return context.WithValue(ctx, rcRequestKey, true)
+}
+
+// IsRCRequest returns true if ctx was created by a remote control (rc) request.
+func IsRCRequest(ctx context.Context) bool {
+	v, _ := ctx.Value(rcRequestKey).(bool)
+	return v
+}
 
 // NewFs makes a new Fs object from the path
 //
@@ -65,11 +84,63 @@ func NewFs(ctx context.Context, path string) (Fs, error) {
 		overriddenConfig[suffix] = extraConfig
 		overriddenConfigMu.Unlock()
 	}
+	ctx, err = addConfigToContext(ctx, configName, config)
+	if err != nil {
+		return nil, err
+	}
 	f, err := fsInfo.NewFs(ctx, configName, fsPath, config)
 	if f != nil && (err == nil || err == ErrorIsFile) {
 		addReverse(f, fsInfo)
 	}
 	return f, err
+}
+
+// Add "global" config or "override" to ctx and the global config if required.
+//
+// This looks through keys prefixed with "global." or "override." in
+// config and sets ctx and optionally the global context if "global.".
+func addConfigToContext(ctx context.Context, configName string, config configmap.Getter) (newCtx context.Context, err error) {
+	overrideConfig := make(configmap.Simple)
+	globalConfig := make(configmap.Simple)
+	for i := range ConfigOptionsInfo {
+		opt := &ConfigOptionsInfo[i]
+		globalName := "global." + opt.Name
+		value, isSet := config.Get(globalName)
+		if isSet {
+			// Set both override and global if global
+			overrideConfig[opt.Name] = value
+			globalConfig[opt.Name] = value
+		}
+		overrideName := "override." + opt.Name
+		value, isSet = config.Get(overrideName)
+		if isSet {
+			overrideConfig[opt.Name] = value
+		}
+	}
+	if len(overrideConfig) == 0 && len(globalConfig) == 0 {
+		return ctx, nil
+	}
+	newCtx, ci := AddConfig(ctx)
+	overrideKeys := slices.Collect(maps.Keys(overrideConfig))
+	slices.Sort(overrideKeys)
+	globalKeys := slices.Collect(maps.Keys(globalConfig))
+	slices.Sort(globalKeys)
+	// Set the config in the newCtx
+	err = configstruct.Set(overrideConfig, ci)
+	if err != nil {
+		return ctx, fmt.Errorf("failed to set override config variables %q: %w", overrideKeys, err)
+	}
+	Debugf(configName, "Set overridden config %q for backend startup", overrideKeys)
+	// Set the global context unless this Fs is being created for an rc request
+	if len(globalConfig) != 0 && !IsRCRequest(ctx) {
+		globalCI := GetConfig(context.Background())
+		err = configstruct.Set(globalConfig, globalCI)
+		if err != nil {
+			return ctx, fmt.Errorf("failed to set global config variables %q: %w", globalKeys, err)
+		}
+		Debugf(configName, "Set global config %q at backend startup", overrideKeys)
+	}
+	return newCtx, nil
 }
 
 // ConfigFs makes the config for calling NewFs with.

@@ -70,7 +70,7 @@ func (gs *Groups) Include(groupsString string) *Groups {
 		return gs
 	}
 	want := map[string]bool{}
-	for _, groupName := range strings.Split(groupsString, ",") {
+	for groupName := range strings.SplitSeq(groupsString, ",") {
 		_, ok := All.ByName[groupName]
 		if !ok {
 			fs.Fatalf(nil, "Couldn't find group %q in command annotation", groupName)
@@ -168,12 +168,18 @@ func installFlag(flags *pflag.FlagSet, name string, groupsString string) {
 			}
 			fs.Debugf(nil, "Setting --%s %q from environment variable %s=%q", name, flag.Value, envKey, envValue)
 			flag.DefValue = envValue
+			// This is a default from the environment, not an explicit
+			// flag on the command line, so don't let it take precedence
+			// over more specific configuration sources.
+			if isOption {
+				opt.MarkUnset()
+			}
 		}
 	}
 
 	// Add flag to Group if it is a global flag
 	if groupsString != "" && flags == pflag.CommandLine {
-		for _, groupName := range strings.Split(groupsString, ",") {
+		for groupName := range strings.SplitSeq(groupsString, ",") {
 			if groupName == "rc-" {
 				groupName = "RC"
 			}

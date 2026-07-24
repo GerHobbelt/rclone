@@ -3,6 +3,7 @@ package http
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -34,16 +35,21 @@ import (
 )
 
 // OptionsInfo describes the Options in use
-var OptionsInfo = fs.Options{}.
+var OptionsInfo = fs.Options{{
+	Name:    "disable_zip",
+	Default: false,
+	Help:    "Disable zip download of directories",
+}}.
 	Add(libhttp.ConfigInfo).
 	Add(libhttp.AuthConfigInfo).
 	Add(libhttp.TemplateConfigInfo)
 
 // Options required for http server
 type Options struct {
-	Auth     libhttp.AuthConfig
-	HTTP     libhttp.Config
-	Template libhttp.TemplateConfig
+	Auth       libhttp.AuthConfig
+	HTTP       libhttp.Config
+	Template   libhttp.TemplateConfig
+	DisableZip bool `config:"disable_zip"`
 }
 
 // DefaultOpt is the default values used for Options
@@ -55,6 +61,9 @@ var DefaultOpt = Options{
 
 // Opt is options set by command line flags
 var Opt = DefaultOpt
+
+//go:embed favicon.png
+var faviconData []byte
 
 func init() {
 	fs.RegisterGlobalOptions(fs.OptionsInfo{Name: "http", Opt: &Opt, Options: OptionsInfo})
@@ -110,7 +119,7 @@ The server will log errors.  Use ` + "`-v`" + ` to see access logs.
 ` + "`--bwlimit`" + ` will be respected for file transfers.  Use ` + "`--stats`" + ` to
 control the stats printing.
 
-` + libhttp.Help(flagPrefix) + libhttp.TemplateHelp(flagPrefix) + libhttp.AuthHelp(flagPrefix) + vfs.Help() + proxy.Help,
+` + strings.TrimSpace(libhttp.Help(flagPrefix)+libhttp.TemplateHelp(flagPrefix)+libhttp.AuthHelp(flagPrefix)+vfs.Help()+proxy.Help),
 	Annotations: map[string]string{
 		"versionIntroduced": "v1.39",
 		"groups":            "Filter",
@@ -182,7 +191,7 @@ func newServer(ctx context.Context, f fs.Fs, opt *Options, vfsOpt *vfscommon.Opt
 		// override auth
 		s.opt.Auth.CustomAuthFn = s.auth
 	} else {
-		s._vfs = vfs.New(f, vfsOpt)
+		s._vfs = vfs.New(ctx, f, vfsOpt)
 	}
 
 	s.server, err = libhttp.NewServer(ctx,
@@ -196,9 +205,11 @@ func newServer(ctx context.Context, f fs.Fs, opt *Options, vfsOpt *vfscommon.Opt
 
 	router := s.server.Router()
 	router.Use(
+		middleware.Compress(5),
 		middleware.SetHeader("Accept-Ranges", "bytes"),
 		middleware.SetHeader("Server", "rclone/"+fs.Version),
 	)
+	router.Get("/favicon.ico", s.serveFavicon)
 	router.Get("/*", s.handler)
 	router.Head("/*", s.handler)
 
@@ -208,6 +219,7 @@ func newServer(ctx context.Context, f fs.Fs, opt *Options, vfsOpt *vfscommon.Opt
 // Serve HTTP until the server is shutdown
 func (s *HTTP) Serve() error {
 	s.server.Serve()
+	fs.Logf(s.f, "HTTP Server started on %s", s.server.URLs())
 	s.server.Wait()
 	return nil
 }
@@ -220,6 +232,27 @@ func (s *HTTP) Addr() net.Addr {
 // Shutdown the server
 func (s *HTTP) Shutdown() error {
 	return s.server.Shutdown()
+}
+
+// serveFavicon serves the remote's favicon.ico if it exists, otherwise
+// the rclone favicon
+func (s *HTTP) serveFavicon(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	VFS, err := s.getVFS(ctx)
+	if err == nil {
+		node, err := VFS.Stat("favicon.ico")
+		if err == nil && node.IsFile() {
+			// Remote has favicon.ico, serve it as a regular file
+			s.serveFile(w, r, "favicon.ico")
+			return
+		}
+	}
+	// Serve the embedded rclone favicon
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "max-age=86400")
+	if _, err := w.Write(faviconData); err != nil {
+		fs.Debugf(nil, "Failed to write favicon: %v", err)
+	}
 }
 
 // handler reads incoming requests and dispatches them
@@ -256,6 +289,24 @@ func (s *HTTP) serveDir(w http.ResponseWriter, r *http.Request, dirRemote string
 		return
 	}
 	dir := node.(*vfs.Dir)
+
+	if r.URL.Query().Get("download") == "zip" && !s.opt.DisableZip {
+		fs.Infof(dirRemote, "%s: Zipping directory", r.RemoteAddr)
+		zipName := path.Base(dirRemote)
+		if dirRemote == "" {
+			zipName = "root"
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+zipName+".zip\"")
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+		err := vfs.CreateZip(ctx, dir, w)
+		if err != nil {
+			serve.Error(ctx, dirRemote, w, "Failed to create zip", err)
+			return
+		}
+		return
+	}
+
 	dirEntries, err := dir.ReadDirAll()
 	if err != nil {
 		serve.Error(ctx, dirRemote, w, "Failed to list directory", err)
@@ -278,6 +329,8 @@ func (s *HTTP) serveDir(w http.ResponseWriter, r *http.Request, dirRemote string
 
 	// Set the Last-Modified header to the timestamp
 	w.Header().Set("Last-Modified", dir.ModTime().UTC().Format(http.TimeFormat))
+
+	directory.DisableZip = s.opt.DisableZip
 
 	directory.Serve(w, r)
 }

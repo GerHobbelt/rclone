@@ -11,10 +11,43 @@ import (
 
 func init() {
 	rc.Add(rc.Call{
-		Path:         "config/dump",
-		Fn:           rcDump,
-		Title:        "Dumps the config file.",
-		AuthRequired: true,
+		Path:  "config/unlock",
+		Fn:    rcConfigPassword,
+		Title: "Unlock the config file.",
+		Help: `
+Unlocks the config file if it is locked.
+
+Parameters:
+
+- 'configPassword' - password to unlock the config file
+
+A good idea is to disable AskPassword before making this call
+`,
+	})
+}
+
+// Unlock the config file
+// A good idea is to disable AskPassword before making this call
+func rcConfigPassword(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	configPass, err := in.GetString("configPassword")
+	if err != nil {
+		var err2 error
+		configPass, err2 = in.GetString("config_password") // backwards compat
+		if err2 != nil {
+			return nil, err
+		}
+	}
+	if SetConfigPassword(configPass) != nil {
+		return nil, errors.New("failed to set config password")
+	}
+	return nil, nil
+}
+
+func init() {
+	rc.Add(rc.Call{
+		Path:  "config/dump",
+		Fn:    rcDump,
+		Title: "Dumps the config file.",
 		Help: `
 Returns a JSON object:
 - key: value
@@ -33,10 +66,9 @@ func rcDump(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 
 func init() {
 	rc.Add(rc.Call{
-		Path:         "config/get",
-		Fn:           rcGet,
-		Title:        "Get a remote in the config file.",
-		AuthRequired: true,
+		Path:  "config/get",
+		Fn:    rcGet,
+		Title: "Get a remote in the config file.",
 		Help: `
 Parameters:
 
@@ -58,10 +90,9 @@ func rcGet(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 
 func init() {
 	rc.Add(rc.Call{
-		Path:         "config/listremotes",
-		Fn:           rcListRemotes,
-		Title:        "Lists the remotes in the config file and defined in environment variables.",
-		AuthRequired: true,
+		Path:  "config/listremotes",
+		Fn:    rcListRemotes,
+		Title: "Lists the remotes in the config file and defined in environment variables.",
 		Help: `
 Returns
 - remotes - array of remote names
@@ -75,6 +106,9 @@ See the [listremotes](/commands/rclone_listremotes/) command for more informatio
 // including any defined by environment variables.
 func rcListRemotes(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 	remoteNames := GetRemoteNames()
+	if remoteNames == nil {
+		remoteNames = []string{}
+	}
 	out = rc.Params{
 		"remotes": remoteNames,
 	}
@@ -83,10 +117,9 @@ func rcListRemotes(ctx context.Context, in rc.Params) (out rc.Params, err error)
 
 func init() {
 	rc.Add(rc.Call{
-		Path:         "config/providers",
-		Fn:           rcProviders,
-		Title:        "Shows how providers are configured in the config file.",
-		AuthRequired: true,
+		Path:  "config/providers",
+		Fn:    rcProviders,
+		Title: "Shows how providers are configured in the config file.",
 		Help: `
 Returns a JSON object:
 - providers - array of objects
@@ -111,7 +144,6 @@ func rcProviders(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 
 func init() {
 	for _, name := range []string{"create", "update", "password"} {
-		name := name
 		extraHelp := ""
 		if name == "create" {
 			extraHelp = "- type - type of the new remote\n"
@@ -129,8 +161,7 @@ func init() {
 `
 		}
 		rc.Add(rc.Call{
-			Path:         "config/" + name,
-			AuthRequired: true,
+			Path: "config/" + name,
 			Fn: func(ctx context.Context, in rc.Params) (rc.Params, error) {
 				return rcConfig(ctx, in, name)
 			},
@@ -202,10 +233,9 @@ func rcConfig(ctx context.Context, in rc.Params, what string) (out rc.Params, er
 
 func init() {
 	rc.Add(rc.Call{
-		Path:         "config/delete",
-		Fn:           rcDelete,
-		Title:        "Delete a remote in the config file.",
-		AuthRequired: true,
+		Path:  "config/delete",
+		Fn:    rcDelete,
+		Title: "Delete a remote in the config file.",
 		Help: `
 Parameters:
 
@@ -228,10 +258,47 @@ func rcDelete(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 
 func init() {
 	rc.Add(rc.Call{
-		Path:         "config/setpath",
-		Fn:           rcSetPath,
-		Title:        "Set the path of the config file",
-		AuthRequired: true,
+		Path:  "config/unset",
+		Fn:    rcUnset,
+		Title: "Unset keys in a remote in the config file.",
+		Help: `
+Parameters:
+
+- name - name of remote
+- keys - a list of key names to remove
+
+Returns:
+
+- removed - a list of the keys that were actually removed
+
+See the [config unset](/commands/rclone_config_unset/) command for more information on the above.
+`,
+	})
+}
+
+// Remove keys from a remote in the config file
+func rcUnset(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	name, err := in.GetString("name")
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	err = in.GetStruct("keys", &keys)
+	if err != nil {
+		return nil, err
+	}
+	removed, err := UnsetRemote(name, keys...)
+	if err != nil {
+		return nil, err
+	}
+	return rc.Params{"removed": removed}, nil
+}
+
+func init() {
+	rc.Add(rc.Call{
+		Path:  "config/setpath",
+		Fn:    rcSetPath,
+		Title: "Set the path of the config file",
 		Help: `
 Parameters:
 
@@ -252,10 +319,9 @@ func rcSetPath(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 
 func init() {
 	rc.Add(rc.Call{
-		Path:         "config/paths",
-		Fn:           rcPaths,
-		Title:        "Reads the config file path and other important paths.",
-		AuthRequired: true,
+		Path:  "config/paths",
+		Fn:    rcPaths,
+		Title: "Reads the config file path and other important paths.",
 		Help: `
 Returns a JSON object with the following keys:
 

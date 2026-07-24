@@ -51,6 +51,10 @@ for a transfer.
 ` + "`--{{ .Prefix }}max-header-bytes`" + ` controls the maximum number of bytes the server will
 accept in the HTTP header.
 
+` + "`--{{ .Prefix }}response-header`" + ` can be used to set an HTTP header for all responses,
+will overriding existing values. The flag may be repeated to add multiple
+headers. Use the format ` + "`Header-Name: value`" + `.
+
 ` + "`--{{ .Prefix }}baseurl`" + ` controls the URL prefix that rclone serves from.  By default
 rclone will serve from the root.  If you used ` + "`--{{ .Prefix }}baseurl \"/rclone\"`" + ` then
 rclone would serve from a URL starting with "/rclone/".  This is
@@ -58,6 +62,14 @@ useful if you wish to proxy rclone serve.  Rclone automatically
 inserts leading and trailing "/" on ` + "`--{{ .Prefix }}baseurl`" + `, so ` + "`--{{ .Prefix }}baseurl \"rclone\"`" + `,
 ` + "`--{{ .Prefix }}baseurl \"/rclone\"` and `--{{ .Prefix }}baseurl \"/rclone/\"`" + ` are all treated
 identically.
+
+` + "`--{{ .Prefix }}disable-zip`" + ` may be set to disable the zipping download option.
+
+#### Protocol
+
+The server supports HTTP/1.1 and HTTP/2.  HTTP/2 is used automatically
+for TLS connections.  For non-TLS connections, HTTP/2 cleartext (h2c)
+is supported, allowing HTTP/2 without encryption.
 
 #### TLS (SSL)
 
@@ -84,13 +96,16 @@ by ` + "`--{{ .Prefix }}addr`" + `).
 
 This allows rclone to be a socket-activated service.
 It can be configured with .socket and .service unit files as described in
-https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html
+<https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html>.
 
 Socket activation can be tested ad-hoc with the ` + "`systemd-socket-activate`" + `command
 
-       systemd-socket-activate -l 8000 -- rclone serve
+` + "```console" + `
+systemd-socket-activate -l 8000 -- rclone serve
+` + "```" + `
 
 This will socket-activate rclone on the first connection to port 8000 over TCP.
+
 `
 	tmpl, err := template.New("server help").Parse(help)
 	if err != nil {
@@ -120,11 +135,11 @@ var ConfigInfo = fs.Options{{
 	Help:    "IPaddress:Port or :Port to bind server to",
 }, {
 	Name:    "server_read_timeout",
-	Default: 1 * time.Hour,
+	Default: fs.Duration(1 * time.Hour),
 	Help:    "Timeout for server reading data",
 }, {
 	Name:    "server_write_timeout",
-	Default: 1 * time.Hour,
+	Default: fs.Duration(1 * time.Hour),
 	Help:    "Timeout for server writing data",
 }, {
 	Name:    "max_header_bytes",
@@ -154,29 +169,34 @@ var ConfigInfo = fs.Options{{
 	Name:    "allow_origin",
 	Default: "",
 	Help:    "Origin which cross-domain request (CORS) can be executed from",
+}, {
+	Name:    "response_header",
+	Default: []string{},
+	Help:    "Set HTTP header for all responses, overriding existing values",
 }}
 
 // Config contains options for the http Server
 type Config struct {
-	ListenAddr         []string      `config:"addr"`                 // Port to listen on
-	BaseURL            string        `config:"baseurl"`              // prefix to strip from URLs
-	ServerReadTimeout  time.Duration `config:"server_read_timeout"`  // Timeout for server reading data
-	ServerWriteTimeout time.Duration `config:"server_write_timeout"` // Timeout for server writing data
-	MaxHeaderBytes     int           `config:"max_header_bytes"`     // Maximum size of request header
-	TLSCert            string        `config:"cert"`                 // Path to TLS PEM public key certificate file (can also include intermediate/CA certificates)
-	TLSKey             string        `config:"key"`                  // Path to TLS PEM private key file
-	TLSCertBody        []byte        `config:"-"`                    // TLS PEM public key certificate body (can also include intermediate/CA certificates), ignores TLSCert
-	TLSKeyBody         []byte        `config:"-"`                    // TLS PEM private key body, ignores TLSKey
-	ClientCA           string        `config:"client_ca"`            // Path to TLS PEM CA file with certificate authorities to verify clients with
-	MinTLSVersion      string        `config:"min_tls_version"`      // MinTLSVersion contains the minimum TLS version that is acceptable.
-	AllowOrigin        string        `config:"allow_origin"`         // AllowOrigin sets the Access-Control-Allow-Origin header
+	ListenAddr         []string    `config:"addr"`                 // Port to listen on
+	BaseURL            string      `config:"baseurl"`              // prefix to strip from URLs
+	ServerReadTimeout  fs.Duration `config:"server_read_timeout"`  // Timeout for server reading data
+	ServerWriteTimeout fs.Duration `config:"server_write_timeout"` // Timeout for server writing data
+	MaxHeaderBytes     int         `config:"max_header_bytes"`     // Maximum size of request header
+	TLSCert            string      `config:"cert"`                 // Path to TLS PEM public key certificate file (can also include intermediate/CA certificates)
+	TLSKey             string      `config:"key"`                  // Path to TLS PEM private key file
+	TLSCertBody        []byte      `config:"-"`                    // TLS PEM public key certificate body (can also include intermediate/CA certificates), ignores TLSCert
+	TLSKeyBody         []byte      `config:"-"`                    // TLS PEM private key body, ignores TLSKey
+	ClientCA           string      `config:"client_ca"`            // Path to TLS PEM CA file with certificate authorities to verify clients with
+	MinTLSVersion      string      `config:"min_tls_version"`      // MinTLSVersion contains the minimum TLS version that is acceptable
+	AllowOrigin        string      `config:"allow_origin"`         // AllowOrigin sets the Access-Control-Allow-Origin header
+	ResponseHeaders    []string    `config:"response_header"`      // Set HTTP header for all responses, overriding existing values
 }
 
 // AddFlagsPrefix adds flags for the httplib
 func (cfg *Config) AddFlagsPrefix(flagSet *pflag.FlagSet, prefix string) {
 	flags.StringArrayVarP(flagSet, &cfg.ListenAddr, prefix+"addr", "", cfg.ListenAddr, "IPaddress:Port, :Port or [unix://]/path/to/socket to bind server to", prefix)
-	flags.DurationVarP(flagSet, &cfg.ServerReadTimeout, prefix+"server-read-timeout", "", cfg.ServerReadTimeout, "Timeout for server reading data", prefix)
-	flags.DurationVarP(flagSet, &cfg.ServerWriteTimeout, prefix+"server-write-timeout", "", cfg.ServerWriteTimeout, "Timeout for server writing data", prefix)
+	flags.FVarP(flagSet, &cfg.ServerReadTimeout, prefix+"server-read-timeout", "", "Timeout for server reading data", prefix)
+	flags.FVarP(flagSet, &cfg.ServerWriteTimeout, prefix+"server-write-timeout", "", "Timeout for server writing data", prefix)
 	flags.IntVarP(flagSet, &cfg.MaxHeaderBytes, prefix+"max-header-bytes", "", cfg.MaxHeaderBytes, "Maximum size of request header", prefix)
 	flags.StringVarP(flagSet, &cfg.TLSCert, prefix+"cert", "", cfg.TLSCert, "Path to TLS PEM public key certificate file (can also include intermediate/CA certificates)", prefix)
 	flags.StringVarP(flagSet, &cfg.TLSKey, prefix+"key", "", cfg.TLSKey, "Path to TLS PEM private key file", prefix)
@@ -184,6 +204,7 @@ func (cfg *Config) AddFlagsPrefix(flagSet *pflag.FlagSet, prefix string) {
 	flags.StringVarP(flagSet, &cfg.BaseURL, prefix+"baseurl", "", cfg.BaseURL, "Prefix for URLs - leave blank for root", prefix)
 	flags.StringVarP(flagSet, &cfg.MinTLSVersion, prefix+"min-tls-version", "", cfg.MinTLSVersion, "Minimum TLS version that is acceptable", prefix)
 	flags.StringVarP(flagSet, &cfg.AllowOrigin, prefix+"allow-origin", "", cfg.AllowOrigin, "Origin which cross-domain request (CORS) can be executed from", prefix)
+	flags.StringArrayVarP(flagSet, &cfg.ResponseHeaders, prefix+"response-header", "", cfg.ResponseHeaders, "Set HTTP header for all responses, overriding existing values", prefix)
 }
 
 // AddHTTPFlagsPrefix adds flags for the httplib
@@ -198,8 +219,8 @@ func AddHTTPFlagsPrefix(flagSet *pflag.FlagSet, prefix string, cfg *Config) {
 func DefaultCfg() Config {
 	return Config{
 		ListenAddr:         []string{"127.0.0.1:8080"},
-		ServerReadTimeout:  1 * time.Hour,
-		ServerWriteTimeout: 1 * time.Hour,
+		ServerReadTimeout:  fs.Duration(1 * time.Hour),
+		ServerWriteTimeout: fs.Duration(1 * time.Hour),
 		MaxHeaderBytes:     4096,
 		MinTLSVersion:      "tls1.0",
 	}
@@ -268,19 +289,29 @@ func newInstance(ctx context.Context, s *Server, listener net.Listener, tlsCfg *
 		listener = tls.NewListener(listener, tlsCfg)
 	}
 
+	httpServer := &http.Server{
+		Handler:           s.mux,
+		ReadTimeout:       time.Duration(s.cfg.ServerReadTimeout),
+		WriteTimeout:      time.Duration(s.cfg.ServerWriteTimeout),
+		MaxHeaderBytes:    s.cfg.MaxHeaderBytes,
+		ReadHeaderTimeout: 10 * time.Second, // time to send the headers
+		IdleTimeout:       60 * time.Second, // time to keep idle connections open
+		TLSConfig:         tlsCfg,
+		BaseContext:       NewBaseContext(ctx, url),
+	}
+
+	// Enable h2c (HTTP/2 cleartext) for non-TLS listeners
+	if tlsCfg == nil {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		httpServer.Protocols = protocols
+	}
+
 	return &instance{
-		url:      url,
-		listener: listener,
-		httpServer: &http.Server{
-			Handler:           s.mux,
-			ReadTimeout:       s.cfg.ServerReadTimeout,
-			WriteTimeout:      s.cfg.ServerWriteTimeout,
-			MaxHeaderBytes:    s.cfg.MaxHeaderBytes,
-			ReadHeaderTimeout: 10 * time.Second, // time to send the headers
-			IdleTimeout:       60 * time.Second, // time to keep idle connections open
-			TLSConfig:         tlsCfg,
-			BaseContext:       NewBaseContext(ctx, url),
-		},
+		url:        url,
+		listener:   listener,
+		httpServer: httpServer,
 	}
 }
 
@@ -328,7 +359,13 @@ func NewServer(ctx context.Context, options ...Option) (*Server, error) {
 		return nil, err
 	}
 
+	responseHeaders, err := fs.ParseHeaders(s.cfg.ResponseHeaders)
+	if err != nil {
+		return nil, err
+	}
+
 	s.mux.Use(MiddlewareCORS(s.cfg.AllowOrigin))
+	s.mux.Use(MiddlewareResponseHeaders(responseHeaders))
 
 	s.initAuth()
 
@@ -520,8 +557,6 @@ func (s *Server) initTLS() error {
 func (s *Server) Serve() {
 	s.wg.Add(len(s.instances))
 	for _, ii := range s.instances {
-		// TODO: decide how/when to log listening url
-		// log.Printf("listening on %s", ii.url)
 		go ii.serve(&s.wg)
 	}
 	// Install an atexit handler to shutdown gracefully

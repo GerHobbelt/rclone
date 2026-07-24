@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -77,6 +78,13 @@ User metadata is stored as extended attributes (which may not be
 supported by all file systems) under the "user.*" prefix.
 
 Metadata is supported on files and directories.
+
+When restoring metadata with ` + "`--metadata`" + ` rclone applies the
+"mode", "uid" and "gid" from the source. These come from the source
+remote which may not be trusted, so restoring metadata as root from an
+untrusted source can change file ownership and is not recommended. The
+setuid, setgid and sticky bits are not restored by default - see the
+` + "`--local-metadata-restore-special-bits`" + ` flag.
 `,
 		},
 		Options: []fs.Option{
@@ -110,6 +118,17 @@ Metadata is supported on files and directories.
 
 This flag disables warning messages on skipped symlinks or junction
 points, as you explicitly acknowledge that they should be skipped.`,
+				Default:  false,
+				NoPrefix: true,
+				Advanced: true,
+			},
+			{
+				Name: "skip_specials",
+				Help: `Don't warn about skipped pipes, sockets and device objects.
+
+This flag disables warning messages on skipped pipes, sockets and
+device objects, as you explicitly acknowledge that they should be
+skipped.`,
 				Default:  false,
 				NoPrefix: true,
 				Advanced: true,
@@ -269,6 +288,37 @@ enabled, rclone will no longer update the modtime after copying a file.`,
 				Advanced: true,
 			},
 			{
+				Name: "metadata_restore_special_bits",
+				Help: `Restore the setuid, setgid and sticky bits from metadata.
+
+When restoring metadata with --metadata rclone applies the "mode" from
+the source. By default rclone applies only the permission bits and
+strips the setuid, setgid and sticky bits.
+
+The "mode" comes from the source remote which may not be trusted.
+Restoring a setuid or setgid bit onto freshly written,
+source-controlled content can plant a setuid binary, which is dangerous
+in particular when restoring from an untrusted source while running as
+root. For this reason these bits are not restored by default.
+
+If you trust the source and want the setuid, setgid and sticky bits
+restored - for example when restoring a system backup made by rclone -
+set this flag.`,
+				Default:  false,
+				Advanced: true,
+			},
+			{
+				Name: "fatal_if_no_space",
+				Help: `Make out-of-space errors fatal during transfers.
+
+When enabled, an ENOSPC error during a write returns a fatal error so
+that rclone aborts rather than retrying the operation. Useful for
+backup scripts that should halt loudly on a full disk rather than spin
+retrying.`,
+				Default:  false,
+				Advanced: true,
+			},
+			{
 				Name: "time_type",
 				Help: `Set what kind of time is returned.
 
@@ -306,6 +356,12 @@ only useful for reading.
 				}},
 			},
 			{
+				Name:     "hashes",
+				Help:     `Comma separated list of supported checksum types.`,
+				Default:  fs.CommaSepList{},
+				Advanced: true,
+			},
+			{
 				Name:     config.ConfigEncoding,
 				Help:     config.ConfigEncodingHelp,
 				Advanced: true,
@@ -318,21 +374,25 @@ only useful for reading.
 
 // Options defines the configuration for this backend
 type Options struct {
-	FollowSymlinks    bool                 `config:"copy_links"`
-	TranslateSymlinks bool                 `config:"links"`
-	SkipSymlinks      bool                 `config:"skip_links"`
-	UTFNorm           bool                 `config:"unicode_normalization"`
-	NoCheckUpdated    bool                 `config:"no_check_updated"`
-	NoUNC             bool                 `config:"nounc"`
-	OneFileSystem     bool                 `config:"one_file_system"`
-	CaseSensitive     bool                 `config:"case_sensitive"`
-	CaseInsensitive   bool                 `config:"case_insensitive"`
-	NoPreAllocate     bool                 `config:"no_preallocate"`
-	NoSparse          bool                 `config:"no_sparse"`
-	NoSetModTime      bool                 `config:"no_set_modtime"`
-	TimeType          timeType             `config:"time_type"`
-	Enc               encoder.MultiEncoder `config:"encoding"`
-	NoClone           bool                 `config:"no_clone"`
+	FollowSymlinks         bool                 `config:"copy_links"`
+	TranslateSymlinks      bool                 `config:"links"`
+	SkipSymlinks           bool                 `config:"skip_links"`
+	SkipSpecials           bool                 `config:"skip_specials"`
+	UTFNorm                bool                 `config:"unicode_normalization"`
+	NoCheckUpdated         bool                 `config:"no_check_updated"`
+	NoUNC                  bool                 `config:"nounc"`
+	OneFileSystem          bool                 `config:"one_file_system"`
+	CaseSensitive          bool                 `config:"case_sensitive"`
+	CaseInsensitive        bool                 `config:"case_insensitive"`
+	NoPreAllocate          bool                 `config:"no_preallocate"`
+	NoSparse               bool                 `config:"no_sparse"`
+	NoSetModTime           bool                 `config:"no_set_modtime"`
+	FatalIfNoSpace         bool                 `config:"fatal_if_no_space"`
+	TimeType               timeType             `config:"time_type"`
+	Hashes                 fs.CommaSepList      `config:"hashes"`
+	Enc                    encoder.MultiEncoder `config:"encoding"`
+	NoClone                bool                 `config:"no_clone"`
+	MetadataRestoreSpecial bool                 `config:"metadata_restore_special_bits"`
 }
 
 // Fs represents a local filesystem rooted at root
@@ -664,8 +724,12 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 			name := fi.Name()
 			mode := fi.Mode()
 			newRemote := f.cleanRemote(dir, name)
+			symlinkFlag := os.ModeSymlink
+			if runtime.GOOS == "windows" {
+				symlinkFlag |= os.ModeIrregular
+			}
 			// Follow symlinks if required
-			if f.opt.FollowSymlinks && (mode&os.ModeSymlink) != 0 {
+			if f.opt.FollowSymlinks && (mode&symlinkFlag) != 0 {
 				localPath := filepath.Join(fsDirPath, name)
 				fi, err = os.Stat(localPath)
 				// Quietly skip errors on excluded files and directories
@@ -687,13 +751,13 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 			if fi.IsDir() {
 				// Ignore directories which are symlinks.  These are junction points under windows which
 				// are kind of a souped up symlink. Unix doesn't have directories which are symlinks.
-				if (mode&os.ModeSymlink) == 0 && f.dev == readDevice(fi, f.opt.OneFileSystem) {
+				if (mode&symlinkFlag) == 0 && f.dev == readDevice(fi, f.opt.OneFileSystem) {
 					d := f.newDirectory(newRemote, fi)
 					entries = append(entries, d)
 				}
 			} else {
 				// Check whether this link should be translated
-				if f.opt.TranslateSymlinks && fi.Mode()&os.ModeSymlink != 0 {
+				if f.opt.TranslateSymlinks && fi.Mode()&symlinkFlag != 0 {
 					newRemote += fs.LinkSuffix
 				}
 				// Don't include non directory if not included
@@ -754,7 +818,7 @@ func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, opt
 // Mkdir creates the directory if it doesn't exist
 func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 	localPath := f.localPath(dir)
-	err := file.MkdirAll(localPath, 0777)
+	err := f.mkdirAll(localPath)
 	if err != nil {
 		return err
 	}
@@ -830,7 +894,13 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	} else if !fi.IsDir() {
 		return fs.ErrorIsFile
 	}
-	return os.Remove(localPath)
+	err := os.Remove(localPath)
+	if runtime.GOOS == "windows" && errors.Is(err, iofs.ErrPermission) { // https://github.com/golang/go/issues/26295
+		if os.Chmod(localPath, 0o600) == nil {
+			err = os.Remove(localPath)
+		}
+	}
+	return err
 }
 
 // Precision of the file system
@@ -1021,18 +1091,30 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 
 // Hashes returns the supported hash sets.
 func (f *Fs) Hashes() hash.Set {
+	if len(f.opt.Hashes) > 0 {
+		// Return only configured hashes.
+		// Note: Could have used hash.SupportOnly to limit supported hashes for all hash related features.
+		var supported hash.Set
+		for _, hashName := range f.opt.Hashes {
+			var ht hash.Type
+			if err := ht.Set(hashName); err != nil {
+				fs.Infof(nil, "Invalid token %q in hash string %q", hashName, f.opt.Hashes.String())
+			}
+			supported.Add(ht)
+		}
+		return supported
+	}
 	return hash.Supported()
 }
 
 var commandHelp = []fs.CommandHelp{
 	{
 		Name:  "noop",
-		Short: "A null operation for testing backend commands",
-		Long: `This is a test command which has some options
-you can try to change the output.`,
+		Short: "A null operation for testing backend commands.",
+		Long:  `This is a test command which has some options you can try to change the output.`,
 		Opts: map[string]string{
-			"echo":  "echo the input arguments",
-			"error": "return an error based on option value",
+			"echo":  "Echo the input arguments.",
+			"error": "Return an error based on option value.",
 		},
 	},
 }
@@ -1126,7 +1208,7 @@ func (o *Object) Hash(ctx context.Context, r hash.Type) (string, error) {
 			var fd *os.File
 			fd, err = file.Open(o.path)
 			if fd != nil {
-				in = newFadviseReadCloser(o, fd, 0, 0)
+				in = fd
 			}
 		} else {
 			in, err = o.openTranslatedLink(0, -1)
@@ -1201,13 +1283,23 @@ func (o *Object) Storable() bool {
 	o.fs.objectMetaMu.RLock()
 	mode := o.mode
 	o.fs.objectMetaMu.RUnlock()
-	if mode&os.ModeSymlink != 0 && !o.fs.opt.TranslateSymlinks {
+
+	// On Windows items with os.ModeIrregular are likely Junction
+	// points so we treat them as symlinks for the purpose of ignoring them.
+	// https://github.com/golang/go/issues/73827
+	symlinkFlag := os.ModeSymlink
+	if runtime.GOOS == "windows" {
+		symlinkFlag |= os.ModeIrregular
+	}
+	if mode&symlinkFlag != 0 && !o.fs.opt.TranslateSymlinks {
 		if !o.fs.opt.SkipSymlinks {
 			fs.Logf(o, "Can't follow symlink without -L/--copy-links")
 		}
 		return false
 	} else if mode&(os.ModeNamedPipe|os.ModeSocket|os.ModeDevice) != 0 {
-		fs.Logf(o, "Can't transfer non file/directory")
+		if !o.fs.opt.SkipSpecials {
+			fs.Logf(o, "Can't transfer non file/directory")
+		}
 		return false
 	} else if mode&os.ModeDir != 0 {
 		// fs.Debugf(o, "Skipping directory")
@@ -1322,7 +1414,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	if err != nil {
 		return
 	}
-	wrappedFd := readers.NewLimitedReadCloser(newFadviseReadCloser(o, fd, offset, limit), limit)
+	wrappedFd := readers.NewLimitedReadCloser(fd, limit)
 	if offset != 0 {
 		// seek the object
 		_, err = fd.Seek(offset, io.SeekStart)
@@ -1343,10 +1435,84 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	return in, nil
 }
 
+// osRoot opens an *os.Root anchored at f.root, together with localPath
+// expressed relative to it. The caller must Close the returned root.
+//
+// When translating symlinks (-l/--links) all writes go through an os.Root so a
+// symlink planted by a malicious source can never be traversed to escape the
+// destination (CWE-59, GHSA-cf44-9pgv-m4xc).
+//
+// f.root is the trusted destination the user chose, so it is created (and
+// followed if it is itself a symlink) before being opened.
+func (f *Fs) osRoot(localPath string) (root *os.Root, rel string, err error) {
+	rel, err = filepath.Rel(f.root, localPath)
+	if err != nil {
+		return nil, "", err
+	}
+	if err = file.MkdirAll(f.root, 0777); err != nil {
+		return nil, "", err
+	}
+	root, err = os.OpenRoot(f.root)
+	if err != nil {
+		return nil, "", err
+	}
+	return root, rel, nil
+}
+
+// mkdirAll makes localPath and any missing parents. When translating
+// symlinks it does so through os.Root so directory creation can't be
+// redirected through a planted symlink out of the destination.
+func (f *Fs) mkdirAll(localPath string) (err error) {
+	if !f.opt.TranslateSymlinks {
+		return file.MkdirAll(localPath, 0777)
+	}
+	root, rel, err := f.osRoot(localPath)
+	if err != nil {
+		return err
+	}
+	defer fs.CheckClose(root, &err)
+	if rel == "." {
+		return nil // the root itself, already created by linkRoot
+	}
+	return root.MkdirAll(rel, 0777)
+}
+
+// openFile opens localPath for writing. When translating symlinks it goes
+// through os.Root so a symlink planted at the path, or at any parent, is never
+// followed out of the destination. The returned file is independent of the
+// root, which is closed before returning.
+func (f *Fs) openFile(localPath string, flags int, perm os.FileMode) (fi *os.File, err error) {
+	if !f.opt.TranslateSymlinks {
+		return file.OpenFile(localPath, flags, perm)
+	}
+	root, rel, err := f.osRoot(localPath)
+	if err != nil {
+		return nil, err
+	}
+	defer fs.CheckClose(root, &err)
+	return root.OpenFile(rel, flags, perm)
+}
+
+// symlink creates a symlink with the given target at localPath, removing
+// any existing file or symlink there first. It goes through os.Root, which
+// creates the link verbatim (the target may point anywhere, preserving a
+// faithful backup) but refuses to create it through a planted symlink, and
+// won't remove a directory in the way.
+func (f *Fs) symlink(target, localPath string) (err error) {
+	root, rel, err := f.osRoot(localPath)
+	if err != nil {
+		return err
+	}
+	defer fs.CheckClose(root, &err)
+	if err := root.Remove(rel); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return root.Symlink(target, rel)
+}
+
 // mkdirAll makes all the directories needed to store the object
 func (o *Object) mkdirAll() error {
-	dir := filepath.Dir(o.path)
-	return file.MkdirAll(dir, 0777)
+	return o.fs.mkdirAll(filepath.Dir(o.path))
 }
 
 type nopWriterCloser struct {
@@ -1358,8 +1524,19 @@ func (nwc nopWriterCloser) Close() error {
 	return nil
 }
 
+// isDiskFullError returns true if err indicates the underlying filesystem
+// has run out of space.
+func isDiskFullError(err error) bool {
+	return errors.Is(err, file.ErrDiskFull) || fserrors.IsErrNoSpace(err)
+}
+
 // Update the object from in with modTime and size
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
+	defer func() {
+		if err != nil && o.fs.opt.FatalIfNoSpace && isDiskFullError(err) {
+			err = fserrors.FatalError(err)
+		}
+	}()
 	var out io.WriteCloser
 	var hasher *hash.MultiHasher
 
@@ -1388,13 +1565,13 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	// If it is a translated link, just read in the contents, and
 	// then create a symlink
 	if !o.translatedLink {
-		f, err := file.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+		f, err := o.fs.openFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 		if err != nil {
 			if runtime.GOOS == "windows" && os.IsPermission(err) {
 				// If permission denied on Windows might be trying to update a
 				// hidden file, in which case try opening without CREATE
 				// See: https://stackoverflow.com/questions/13215716/ioerror-errno-13-permission-denied-when-trying-to-open-hidden-file-in-w-mod
-				f, err = file.OpenFile(o.path, os.O_WRONLY|os.O_TRUNC, 0666)
+				f, err = o.fs.openFile(o.path, os.O_WRONLY|os.O_TRUNC, 0666)
 				if err != nil {
 					return err
 				}
@@ -1431,15 +1608,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 
 	if o.translatedLink {
 		if err == nil {
-			// Remove any current symlink or file, if one exists
-			if _, err := os.Lstat(o.path); err == nil {
-				if removeErr := os.Remove(o.path); removeErr != nil {
-					fs.Errorf(o, "Failed to remove previous file: %v", removeErr)
-					return removeErr
-				}
-			}
-			// Use the contents for the copied object to create a symlink
-			err = os.Symlink(symlinkData.String(), o.path)
+			// Use the contents of the copied object to create a symlink,
+			// without following or creating it through a planted symlink
+			// (CWE-59). Any existing file or symlink at the path is replaced.
+			err = o.fs.symlink(symlinkData.String(), o.path)
 		}
 
 		// only continue if symlink creation succeeded
@@ -1503,7 +1675,7 @@ func (f *Fs) OpenWriterAt(ctx context.Context, remote string, size int64) (fs.Wr
 		return nil, errors.New("can't open a symlink for random writing")
 	}
 
-	out, err := file.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	out, err := f.openFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		return nil, err
 	}
@@ -1651,9 +1823,18 @@ func cleanRootPath(s string, noUNC bool, enc encoder.MultiEncoder) string {
 	if runtime.GOOS == "windows" {
 		s = vol + s
 	}
-	s2, err := filepath.Abs(s)
-	if err == nil {
-		s = s2
+	// UNC paths on Windows must be absolute, so make the path absolute
+	// there. On other platforms filepath.Abs would prepend the current
+	// directory, but the resulting absolute string is not guaranteed to
+	// refer to the same directory as the original relative path - for
+	// example when the current directory is shadowed by a mount or has been
+	// removed - so just clean it lexically instead.
+	if runtime.GOOS == "windows" {
+		if s2, err := filepath.Abs(s); err == nil {
+			s = s2
+		}
+	} else {
+		s = filepath.Clean(s)
 	}
 	if !noUNC {
 		// Convert to UNC. It does nothing on non windows platforms.

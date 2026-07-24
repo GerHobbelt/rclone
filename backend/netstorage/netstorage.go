@@ -87,7 +87,7 @@ Please choose the 'y' option to set your own password then enter your secret.`,
 
 var commandHelp = []fs.CommandHelp{{
 	Name:  "du",
-	Short: "Return disk usage information for a specified directory",
+	Short: "Return disk usage information for a specified directory.",
 	Long: `The usage information returned, includes the targeted directory as well as all
 files stored in any sub-directories that may exist.`,
 }, {
@@ -96,7 +96,12 @@ files stored in any sub-directories that may exist.`,
 	Long: `The desired path location (including applicable sub-directories) ending in
 the object that will be the target of the symlink (for example, /links/mylink).
 Include the file extension for the object, if applicable.
-` + "`rclone backend symlink <src> <path>`",
+
+Usage example:
+
+` + "```console" + `
+rclone backend symlink <src> <path>
+` + "```",
 },
 }
 
@@ -1045,14 +1050,15 @@ func (o *Object) netStorageUploadRequest(ctx context.Context, in io.Reader, src 
 
 	// Invalidate stat cache
 	o.fs.deleteStatCache(URL)
-	if o.size == -1 {
-		files, err := o.fs.netStorageStatRequest(ctx, URL, false)
-		if err != nil {
-			return nil
-		}
-		if files != nil {
-			o.size = files[0].Size
-		}
+	// Stat the uploaded file to get the md5 the server computed and
+	// the size for streaming uploads.
+	files, err := o.fs.netStorageStatRequest(ctx, URL, false)
+	if err != nil {
+		return nil
+	}
+	if files != nil {
+		o.size = files[0].Size
+		o.md5sum = files[0].Md5
 	}
 	return nil
 }

@@ -19,6 +19,7 @@ unless `--no-create` or `--recursive` is provided.
 If `--recursive` is used then recursively sets the modification
 time on all existing files that is found under the path. Filters are supported,
 and you can test with the `--dry-run` or the `--interactive`/`-i` flag.
+This will touch `--transfers` files concurrently.
 
 If `--timestamp` is used then sets the modification time to that
 time instead of the current time. Times may be specified as one of:
@@ -30,6 +31,9 @@ time instead of the current time. Times may be specified as one of:
 Note that value of `--timestamp` is in UTC. If you want local time
 then add the `--localtime` flag.
 
+Metadata can be added when creating a new file with `--metadata-set`.
+For example:
+  rclone touch remote:path -M --metadata-set key=value
 
 ```
 rclone touch remote:path [flags]
@@ -52,7 +56,7 @@ See the [global flags page](/flags/) for global options not listed here.
 
 Important flags useful for most commands
 
-```
+```text
   -n, --dry-run         Do a trial run with no permanent changes
   -i, --interactive     Enable interactive mode
   -v, --verbose count   Print lots more stuff (repeat for more)
@@ -62,15 +66,17 @@ Important flags useful for most commands
 
 Flags for filtering directory listings
 
-```
+```text
       --delete-excluded                     Delete files on dest excluded from sync
       --exclude stringArray                 Exclude files matching pattern
       --exclude-from stringArray            Read file exclude patterns from file (use - to read from stdin)
       --exclude-if-present stringArray      Exclude directories if filename is present
       --files-from stringArray              Read list of source-file names from file (use - to read from stdin)
       --files-from-raw stringArray          Read list of source-file names from file without any processing of lines (use - to read from stdin)
+      --files-from0 stringArray             Read list of source-file names from file using NUL as separator (use - to read from stdin)
   -f, --filter stringArray                  Add a file filtering rule
       --filter-from stringArray             Read file filtering patterns from a file (use - to read from stdin)
+      --hash-filter string                  Partition filenames by hash k/n or randomly @/n
       --ignore-case                         Ignore case in filters (case insensitive)
       --include stringArray                 Include files matching pattern
       --include-from stringArray            Read file include patterns from file (use - to read from stdin)
@@ -91,12 +97,17 @@ Flags for filtering directory listings
 
 Flags for listing directories
 
-```
+```text
       --default-time Time   Time to show if modtime is unknown for files and directories (default 2000-01-01T00:00:00Z)
       --fast-list           Use recursive list if available; uses more memory but fewer transactions
 ```
 
 ## See Also
 
+<!-- markdownlint-capture -->
+<!-- markdownlint-disable ul-style line-length -->
+
 * [rclone](/commands/rclone/)	 - Show help for rclone commands, flags and backends.
 
+
+<!-- markdownlint-restore -->

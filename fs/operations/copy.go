@@ -99,10 +99,13 @@ func (c *copy) checkPartial(ctx context.Context) (remoteForCopy string, inplace 
 	// Avoid making the leaf name longer if it's already lengthy to avoid
 	// trouble with file name length limits.
 
-	// generate a stable random suffix by hashing the fingerprint
-	hash := crc32.ChecksumIEEE([]byte(fs.Fingerprint(ctx, c.src, true)))
+	// generate a stable random suffix by hashing the filename and fingerprint
+	hasher := crc32.New(crc32.IEEETable)
+	_, _ = hasher.Write([]byte(c.remote))
+	_, _ = hasher.Write([]byte(fs.Fingerprint(ctx, c.src, true)))
+	hash := hasher.Sum32()
 
-	suffix := fmt.Sprintf(".%x%s", hash, c.ci.PartialSuffix)
+	suffix := fmt.Sprintf(".%08x%s", hash, c.ci.PartialSuffix)
 	base := path.Base(remoteForCopy)
 	if len(base) > 100 {
 		remoteForCopy = TruncateString(remoteForCopy, len(remoteForCopy)-len(suffix)) + suffix
@@ -148,9 +151,17 @@ func (c *copy) serverSideCopy(ctx context.Context) (actionTaken string, newDst f
 	}
 	in := c.tr.Account(ctx, nil) // account the transfer
 	in.ServerSideTransferStart()
-	newDst, err = doCopy(ctx, c.src, c.remoteForCopy)
+	newCtx, ta := in.NewServerSideCopyAccounter(ctx)
+	newDst, err = doCopy(newCtx, c.src, c.remoteForCopy)
 	if err == nil {
-		in.ServerSideCopyEnd(newDst.Size()) // account the bytes for the server-side transfer
+		var n int64
+		if !ta.Started() {
+			n = newDst.Size()
+		}
+		in.ServerSideCopyEnd(n) // account the bytes for the server-side transfer
+	} else {
+		// Rewind any stats counted on error
+		ta.Reset()
 	}
 	_ = in.Close()
 	if errors.Is(err, fs.ErrorCantCopy) {

@@ -9,6 +9,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/flags"
 	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/fs/operations/operationsflags"
 	"github.com/rclone/rclone/fs/sync"
 	"github.com/spf13/cobra"
 )
@@ -16,6 +17,8 @@ import (
 var (
 	createEmptySrcDirs = false
 	listOrder          = fs.ListOrderDefault
+	loggerOpt          = operations.LoggerOpt{}
+	loggerFlagsOpt     = operationsflags.AddLoggerFlagsOptions{}
 )
 
 func init() {
@@ -23,6 +26,8 @@ func init() {
 	cmdFlags := commandDefinition.Flags()
 	flags.BoolVarP(cmdFlags, &createEmptySrcDirs, "create-empty-src-dirs", "", createEmptySrcDirs, "Create empty source dirs on destination after copy", "")
 	flags.StringVarP(cmdFlags, &listOrder, "list-order", "", listOrder, "Set directory listing order: default, reverse, random", "")
+	operationsflags.AddLoggerFlags(cmdFlags, &loggerOpt, &loggerFlagsOpt)
+	loggerOpt.LoggerFn = operations.NewDefaultLoggerFn(&loggerOpt)
 }
 
 var commandDefinition = &cobra.Command{
@@ -48,22 +53,30 @@ go there.
 
 For example
 
-    rclone copy source:sourcepath dest:destpath
+|||sh
+rclone copy source:sourcepath dest:destpath
+|||
 
 Let's say there are two files in sourcepath
 
-    sourcepath/one.txt
-    sourcepath/two.txt
+|||text
+sourcepath/one.txt
+sourcepath/two.txt
+|||
 
 This copies them to
 
-    destpath/one.txt
-    destpath/two.txt
+|||text
+destpath/one.txt
+destpath/two.txt
+|||
 
 Not to
 
-    destpath/sourcepath/one.txt
-    destpath/sourcepath/two.txt
+|||text
+destpath/sourcepath/one.txt
+destpath/sourcepath/two.txt
+|||
 
 If you are familiar with |rsync|, rclone always works as if you had
 written a trailing |/| - meaning "copy the contents of this directory".
@@ -79,26 +92,28 @@ For example, if you have many files in /path/to/src but only a few of
 them change every day, you can copy all the files which have changed
 recently very efficiently like this:
 
-    rclone copy --max-age 24h --no-traverse /path/to/src remote:
-
+|||sh
+rclone copy --max-age 24h --no-traverse /path/to/src remote:
+|||
 
 Rclone will sync the modification times of files and directories if
 the backend supports it. If metadata syncing is required then use the
 |--metadata| flag.
 
 Note that the modification time and metadata for the root directory
-will **not** be synced. See https://github.com/rclone/rclone/issues/7652
+will **not** be synced. See [issue #7652](https://github.com/rclone/rclone/issues/7652)
 for more info.
 
 **Note**: Use the |-P|/|--progress| flag to view real-time transfer statistics.
 
-**Note**: Use the |--dry-run| or the |--interactive|/|-i| flag to test without copying anything.
-`, "|", "`"),
+**Note**: Use the |--dry-run| or the |--interactive|/|-i| flag to test without
+copying anything.
+
+`, "|", "`") + operationsflags.Help(),
 	Annotations: map[string]string{
 		"groups": "Copy,Filter,Listing,Important",
 	},
 	Run: func(command *cobra.Command, args []string) {
-
 		cmd.CheckArgs(2, 2, command, args)
 		fsrc, srcFileName, fdst := cmd.NewFsSrcFileDst(args)
 		// mod
@@ -112,6 +127,15 @@ for more info.
 				return err
 			}
 			ci.ListOrder = parsedListOrder
+			close, err := operationsflags.ConfigureLoggers(ctx, fdst, command, &loggerOpt, loggerFlagsOpt)
+			if err != nil {
+				return err
+			}
+			defer close()
+
+			if loggerFlagsOpt.AnySet() {
+				ctx = operations.WithSyncLogger(ctx, loggerOpt)
+			}
 			if srcFileName == "" {
 				return sync.CopyDir(ctx, fdst, fsrc, createEmptySrcDirs)
 			}

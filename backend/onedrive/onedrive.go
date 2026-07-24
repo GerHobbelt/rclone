@@ -155,6 +155,21 @@ See: https://github.com/rclone/rclone/issues/1716
 			Default:  fs.SizeSuffix(-1),
 			Advanced: true,
 		}, {
+			Name: "tenant_url",
+			Help: `The tenant URL for non-admin OneDrive access.
+
+Set this to your SharePoint tenant URL to use the SharePoint v2.0 API
+endpoint instead of the standard Microsoft Graph API. This allows
+accessing business OneDrive without admin consent.
+
+The URL can be found in your browser's developer tools by searching
+for "driveAccessToken" in the network requests. Look for the
+".driveUrl" field which contains the tenant URL and drive ID.
+
+Example: https://your-tenant.sharepoint.com/_api`,
+			Default:  "",
+			Advanced: true,
+		}, {
 			Name: "chunk_size",
 			Help: `Chunk size to upload files with - must be multiple of 320k (327,680 bytes).
 
@@ -403,7 +418,7 @@ This is why this flag is not set as the default.
 
 As a rule of thumb if nearly all of your data is under rclone's root
 directory (the |root/directory| in |onedrive:root/directory|) then
-using this flag will be be a big performance win. If your data is
+using this flag will be a big performance win. If your data is
 mostly not under the root then using this flag will be a big
 performance loss.
 
@@ -471,7 +486,15 @@ isn't always desirable to set the permissions from the metadata.
 // Get the region and graphURL from the config
 func getRegionURL(m configmap.Mapper) (region, graphURL string) {
 	region, _ = m.Get("region")
+
 	graphURL = graphAPIEndpoint[region] + "/v1.0"
+
+	// Check if tenant_url is provided for non-admin mode
+	tenantURL, _ := m.Get("tenant_url")
+	if tenantURL != "" {
+		graphURL = tenantURL + "/v2.0"
+	}
+
 	return region, graphURL
 }
 
@@ -776,6 +799,7 @@ type Options struct {
 	Region                  string               `config:"region"`
 	UploadCutoff            fs.SizeSuffix        `config:"upload_cutoff"`
 	ChunkSize               fs.SizeSuffix        `config:"chunk_size"`
+	TenantURL               string               `config:"tenant_url"`
 	DriveID                 string               `config:"drive_id"`
 	DriveType               string               `config:"drive_type"`
 	RootFolderID            string               `config:"root_folder_id"`
@@ -1087,6 +1111,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 
 	rootURL := graphAPIEndpoint[opt.Region] + "/v1.0" + "/drives/" + opt.DriveID
 
+	if opt.TenantURL != "" {
+		rootURL = opt.TenantURL + "/v2.0" + "/drives/" + opt.DriveID
+	}
+
 	oauthConfig, err := makeOauthConfig(ctx, opt)
 	if err != nil {
 		return nil, err
@@ -1394,9 +1422,27 @@ func (f *Fs) itemToDirEntry(ctx context.Context, dir string, info *api.Item) (en
 // This should return ErrDirNotFound if the directory isn't
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
+	return list.WithListP(ctx, dir, f)
+}
+
+// ListP lists the objects and directories of the Fs starting
+// from dir non recursively into out.
+//
+// dir should be "" to start from the root, and should not
+// have trailing slashes.
+//
+// This should return ErrDirNotFound if the directory isn't
+// found.
+//
+// It should call callback for each tranche of entries read.
+// These need not be returned in any particular order.  If
+// callback returns an error then the listing will stop
+// immediately.
+func (f *Fs) ListP(ctx context.Context, dir string, callback fs.ListRCallback) error {
+	list := list.NewHelper(callback)
 	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	err = f.listAll(ctx, directoryID, false, false, func(info *api.Item) error {
 		entry, err := f.itemToDirEntry(ctx, dir, info)
@@ -1406,13 +1452,16 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 		if entry == nil {
 			return nil
 		}
-		entries = append(entries, entry)
+		err = list.Add(entry)
+		if err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return entries, nil
+	return list.Flush()
 }
 
 // ListR lists the objects and directories of the Fs starting
@@ -2550,7 +2599,7 @@ func (o *Object) cancelUploadSession(ctx context.Context, url string) (err error
 	}
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.Call(ctx, &opts)
+		resp, err = o.fs.unAuth.Call(ctx, &opts)
 		return shouldRetry(ctx, resp, err)
 	})
 	return
@@ -2734,7 +2783,13 @@ func (o *Object) ID() string {
 // and returns itemID, driveID, rootURL.
 // Such a normalized ID can come from (*Item).GetID()
 func (f *Fs) parseNormalizedID(ID string) (string, string, string) {
-	rootURL := graphAPIEndpoint[f.opt.Region] + "/v1.0/drives"
+	var rootURL string
+	if f.opt.TenantURL != "" {
+		rootURL = f.opt.TenantURL + "/v2.0/drives"
+	} else {
+		rootURL = graphAPIEndpoint[f.opt.Region] + "/v1.0/drives"
+	}
+
 	if strings.Contains(ID, "#") {
 		s := strings.Split(ID, "#")
 		return s[1], s[0], rootURL
@@ -2929,7 +2984,12 @@ func (f *Fs) changeNotifyNextChange(ctx context.Context, token string) (delta ap
 }
 
 func (f *Fs) buildDriveDeltaOpts(token string) rest.Opts {
-	rootURL := graphAPIEndpoint[f.opt.Region] + "/v1.0/drives"
+	var rootURL string
+	if f.opt.TenantURL != "" {
+		rootURL = f.opt.TenantURL + "/v2.0/drives"
+	} else {
+		rootURL = graphAPIEndpoint[f.opt.Region] + "/v1.0/drives"
+	}
 
 	return rest.Opts{
 		Method:     "GET",
@@ -3040,6 +3100,7 @@ var (
 	_ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.CleanUpper      = (*Fs)(nil)
 	_ fs.ListRer         = (*Fs)(nil)
+	_ fs.ListPer         = (*Fs)(nil)
 	_ fs.Shutdowner      = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.MimeTyper       = &Object{}

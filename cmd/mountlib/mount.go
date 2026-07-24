@@ -94,6 +94,11 @@ var OptionsInfo = fs.Options{{
 	Help:    "Allow access to other users (not supported on Windows)",
 	Groups:  "Mount",
 }, {
+	Name:    "allow_idmap",
+	Default: false,
+	Help:    "Allow id-mapped mounts (Linux 6.12+, mount2 only)",
+	Groups:  "Mount",
+}, {
 	Name:    "async_read",
 	Default: true,
 	Help:    "Use asynchronous reads (not supported on Windows)",
@@ -172,6 +177,7 @@ type Options struct {
 	AllowNonEmpty      bool          `config:"allow_non_empty"`
 	AllowRoot          bool          `config:"allow_root"`
 	AllowOther         bool          `config:"allow_other"`
+	AllowIDMap         bool          `config:"allow_idmap"`
 	DefaultPermissions bool          `config:"default_permissions"`
 	WritebackCache     bool          `config:"write_back_cache"`
 	Daemon             bool          `config:"daemon"`
@@ -195,7 +201,11 @@ type (
 	// UnmountFn is called to unmount the file system
 	UnmountFn func() error
 	// MountFn is called to mount the file system
-	MountFn func(VFS *vfs.VFS, mountpoint string, opt *Options) (<-chan error, func() error, error)
+	//
+	// It returns the errChan, unmount function, the actual mountpoint
+	// (which may differ from the input, e.g. on Windows when "*" is
+	// used to auto-assign a drive letter) and an error.
+	MountFn func(VFS *vfs.VFS, mountpoint string, opt *Options) (<-chan error, func() error, string, error)
 )
 
 // MountPoint represents a mount with options and runtime state
@@ -273,7 +283,7 @@ func NewMountCommand(commandName string, hidden bool, mount MountFn) *cobra.Comm
 		Use:    commandName + " remote:path /path/to/mountpoint",
 		Hidden: hidden,
 		Short:  `Mount the remote as file system on a mountpoint.`,
-		Long:   help(commandName) + vfs.Help(),
+		Long:   help(commandName) + strings.TrimSpace(vfs.Help()),
 		Annotations: map[string]string{
 			"versionIntroduced": "v1.33",
 			"groups":            "Filter",
@@ -369,14 +379,18 @@ func (m *MountPoint) Mount() (mountDaemon *os.Process, err error) {
 		}
 	}
 
-	m.VFS = vfs.New(m.Fs, &m.VFSOpt)
+	m.VFS = vfs.New(context.Background(), m.Fs, &m.VFSOpt)
 
-	m.ErrChan, m.UnmountFn, err = m.MountFn(m.VFS, m.MountPoint, &m.MountOpt)
+	var actualMountpoint string
+	m.ErrChan, m.UnmountFn, actualMountpoint, err = m.MountFn(m.VFS, m.MountPoint, &m.MountOpt)
 	if err != nil {
 		if len(os.Args) > 0 && strings.HasPrefix(os.Args[0], "/snap/") {
 			return nil, fmt.Errorf("mounting is not supported when running from snap")
 		}
 		return nil, fmt.Errorf("failed to mount FUSE fs: %w", err)
+	}
+	if actualMountpoint != "" {
+		m.MountPoint = actualMountpoint
 	}
 	m.MountedOn = time.Now()
 	return nil, nil
@@ -396,34 +410,14 @@ func (m *MountPoint) Wait() error {
 			if err := m.Unmount(); err != nil {
 				fs.Errorf(m.MountPoint, "Failed to unmount: %v", err)
 			} else {
-				fs.Errorf(m.MountPoint, "Unmounted rclone mount")
+				fs.Logf(m.MountPoint, "Unmounted rclone mount")
 			}
 		})
 	}
 	fnHandle := atexit.Register(finalise)
 	defer atexit.Unregister(fnHandle)
 
-	// Reload VFS cache on SIGHUP
-	sigHup := make(chan os.Signal, 1)
-	NotifyOnSigHup(sigHup)
-	var err error
-
-	waiting := true
-	for waiting {
-		select {
-		// umount triggered outside the app
-		case err = <-m.ErrChan:
-			waiting = false
-		// user sent SIGHUP to clear the cache
-		case <-sigHup:
-			root, err := m.VFS.Root()
-			if err != nil {
-				fs.Errorf(m.VFS.Fs(), "Error reading root: %v", err)
-			} else {
-				root.ForgetAll()
-			}
-		}
-	}
+	err := <-m.ErrChan
 
 	finalise()
 

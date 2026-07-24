@@ -75,19 +75,14 @@ var OptionsInfo = fs.Options{{
 	Groups:  "RC,Metrics",
 }, {
 	Name:    "rc_job_expire_duration",
-	Default: 60 * time.Second,
+	Default: fs.Duration(60 * time.Second),
 	Help:    "Expire finished async jobs older than this value",
 	Groups:  "RC",
 }, {
 	Name:    "rc_job_expire_interval",
-	Default: 10 * time.Second,
+	Default: fs.Duration(10 * time.Second),
 	Help:    "Interval to check for expired async jobs",
 	Groups:  "RC",
-}, {
-	Name:    "metrics_addr",
-	Default: []string{},
-	Help:    "IPaddress:Port or :Port to bind metrics server to",
-	Groups:  "Metrics",
 }}.
 	AddPrefix(libhttp.ConfigInfo, "rc", "RC").
 	AddPrefix(libhttp.AuthConfigInfo, "rc", "RC").
@@ -95,7 +90,8 @@ var OptionsInfo = fs.Options{{
 	AddPrefix(libhttp.ConfigInfo, "metrics", "Metrics").
 	AddPrefix(libhttp.AuthConfigInfo, "metrics", "Metrics").
 	AddPrefix(libhttp.TemplateConfigInfo, "metrics", "Metrics").
-	SetDefault("rc_addr", []string{"localhost:5572"})
+	SetDefault("rc_addr", []string{"localhost:5572"}).
+	SetDefault("metrics_addr", []string{})
 
 func init() {
 	fs.RegisterGlobalOptions(fs.OptionsInfo{Name: "rc", Opt: &Opt, Options: OptionsInfo})
@@ -110,7 +106,7 @@ type Options struct {
 	Files               string                 `config:"rc_files"`                   // set to enable serving files locally
 	Serve               bool                   `config:"rc_serve"`                   // set to serve files from remotes
 	ServeNoModTime      bool                   `config:"rc_serve_no_modtime"`        // don't read the modification time
-	NoAuth              bool                   `config:"rc_no_auth"`                 // set to disable auth checks on AuthRequired methods
+	NoAuth              bool                   `config:"rc_no_auth"`                 // set to disable auth checks on methods which require it
 	WebUI               bool                   `config:"rc_web_gui"`                 // set to launch the web ui
 	WebGUIUpdate        bool                   `config:"rc_web_gui_update"`          // set to check new update
 	WebGUIForceUpdate   bool                   `config:"rc_web_gui_force_update"`    // set to force download new update
@@ -120,8 +116,8 @@ type Options struct {
 	MetricsHTTP         libhttp.Config         `config:"metrics"`
 	MetricsAuth         libhttp.AuthConfig     `config:"metrics"`
 	MetricsTemplate     libhttp.TemplateConfig `config:"metrics"`
-	JobExpireDuration   time.Duration          `config:"rc_job_expire_duration"`
-	JobExpireInterval   time.Duration          `config:"rc_job_expire_interval"`
+	JobExpireDuration   fs.Duration            `config:"rc_job_expire_duration"`
+	JobExpireInterval   fs.Duration            `config:"rc_job_expire_interval"`
 }
 
 // Opt is the default values used for Options

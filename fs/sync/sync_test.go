@@ -218,6 +218,35 @@ func TestCopyNoTraverse(t *testing.T) {
 	r.CheckRemoteItems(t, file1)
 }
 
+func TestCopyNoTraverseDeadlock(t *testing.T) {
+	r := fstest.NewRun(t)
+	if !r.Fremote.Features().IsLocal {
+		t.Skip("Only runs on local")
+	}
+	const nFiles = 200
+	t1 := fstest.Time("2001-02-03T04:05:06.499999999Z")
+
+	// Create lots of source files.
+	items := make([]fstest.Item, nFiles)
+	for i := range items {
+		name := fmt.Sprintf("file%d.txt", i)
+		items[i] = r.WriteFile(name, fmt.Sprintf("content%d", i), t1)
+	}
+	r.CheckLocalItems(t, items...)
+
+	// Set --no-traverse
+	ctx, ci := fs.AddConfig(context.Background())
+	ci.NoTraverse = true
+
+	// Initial copy to establish destination.
+	require.NoError(t, CopyDir(ctx, r.Fremote, r.Flocal, false))
+	r.CheckRemoteItems(t, items...)
+
+	// Second copy which shouldn't deadlock
+	require.NoError(t, CopyDir(ctx, r.Flocal, r.Fremote, false))
+	r.CheckRemoteItems(t, items...)
+}
+
 // Now with --check-first
 func TestCopyCheckFirst(t *testing.T) {
 	ctx := context.Background()
@@ -631,7 +660,7 @@ func TestServerSideCopyOverSelf(t *testing.T) {
 	ctx = predictDstFromLogger(ctx)
 	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
 	require.NoError(t, err)
-	testLoggerVsLsf(ctx, r.Fremote, r.Flocal, operations.GetLoggerOpt(ctx).JSON, t)
+	testLoggerVsLsf(ctx, FremoteCopy, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	fstest.CheckItems(t, FremoteCopy, file1)
 
 	file2 := r.WriteObject(ctx, "sub dir/hello world", "hello world again", t2)
@@ -640,7 +669,7 @@ func TestServerSideCopyOverSelf(t *testing.T) {
 	ctx = predictDstFromLogger(ctx)
 	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
 	require.NoError(t, err)
-	testLoggerVsLsf(ctx, r.Fremote, r.Flocal, operations.GetLoggerOpt(ctx).JSON, t)
+	testLoggerVsLsf(ctx, FremoteCopy, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	fstest.CheckItems(t, FremoteCopy, file2)
 }
 
@@ -676,7 +705,7 @@ func TestServerSideMoveOverSelf(t *testing.T) {
 	ctx = predictDstFromLogger(ctx)
 	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
 	require.NoError(t, err)
-	testLoggerVsLsf(ctx, r.Fremote, r.Flocal, operations.GetLoggerOpt(ctx).JSON, t)
+	testLoggerVsLsf(ctx, FremoteCopy, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	fstest.CheckItems(t, FremoteCopy, file1)
 
 	file2 := r.WriteObject(ctx, "sub dir/hello world", "hello world again", t2)
@@ -779,7 +808,7 @@ func TestSyncBasedOnCheckSum(t *testing.T) {
 
 // Create a file and sync it. Change the last modified date and the
 // file contents but not the size.  If we're only doing sync by size
-// only, we expect nothing to to be transferred on the second sync.
+// only, we expect nothing to be transferred on the second sync.
 func TestSyncSizeOnly(t *testing.T) {
 	ctx := context.Background()
 	ctx, ci := fs.AddConfig(ctx)
@@ -816,7 +845,7 @@ func TestSyncSizeOnly(t *testing.T) {
 }
 
 // Create a file and sync it. Keep the last modified date but change
-// the size.  With --ignore-size we expect nothing to to be
+// the size.  With --ignore-size we expect nothing to be
 // transferred on the second sync.
 func TestSyncIgnoreSize(t *testing.T) {
 	ctx := context.Background()
@@ -1274,6 +1303,7 @@ func TestSyncAfterRemovingAFileAndAddingAFileSubDirWithErrors(t *testing.T) {
 	err := Sync(ctx, r.Fremote, r.Flocal, false)
 	assert.Equal(t, fs.ErrorNotDeleting, err)
 	testLoggerVsLsf(ctx, r.Fremote, r.Flocal, operations.GetLoggerOpt(ctx).JSON, t)
+	accounting.GlobalStats().ResetCounters()
 
 	r.CheckLocalListing(
 		t,
@@ -1440,7 +1470,7 @@ func TestSyncWithUpdateOlder(t *testing.T) {
 	r.CheckRemoteItems(t, oneO, twoO, threeO, fourO)
 
 	ci.UpdateOlder = true
-	ci.ModifyWindow = fs.ModTimeNotSupported
+	ci.ModifyWindow = fs.Duration(fs.ModTimeNotSupported)
 
 	ctx = predictDstFromLogger(ctx)
 	err := Sync(ctx, r.Fremote, r.Flocal, false)
@@ -1470,7 +1500,7 @@ func testSyncWithMaxDuration(t *testing.T, cutoffMode fs.CutoffMode) {
 	}
 	r := fstest.NewRun(t)
 
-	maxDuration := 250 * time.Millisecond
+	maxDuration := fs.Duration(250 * time.Millisecond)
 	ci.MaxDuration = maxDuration
 	ci.CutoffMode = cutoffMode
 	ci.CheckFirst = true
@@ -1512,7 +1542,7 @@ func testSyncWithMaxDuration(t *testing.T, cutoffMode fs.CutoffMode) {
 	const maxTransferTime = 20 * time.Second
 
 	what := fmt.Sprintf("expecting elapsed time %v between %v and %v", elapsed, maxDuration, maxTransferTime)
-	assert.True(t, elapsed >= maxDuration, what)
+	assert.True(t, elapsed >= time.Duration(maxDuration), what)
 	assert.True(t, elapsed < maxTransferTime, what)
 }
 
@@ -3004,6 +3034,9 @@ func DstLsf(ctx context.Context, Fremote fs.Fs) *bytes.Buffer {
 
 	list.SetSeparator(";")
 	timeFormat := operations.FormatForLSFPrecision(Fremote.Precision())
+	if Fremote.Precision() == fs.ModTimeNotSupported {
+		timeFormat = "none"
+	}
 	list.AddModTime(timeFormat)
 	list.AddHash(hash.MD5)
 	list.AddSize()
@@ -3055,7 +3088,7 @@ func testLoggerVsLsf(ctx context.Context, fdst, fsrc fs.Fs, logger *bytes.Buffer
 			elements := bytes.Split(line, []byte(";"))
 			if len(elements) >= 2 {
 				if !canTestModtime {
-					elements[0] = []byte("")
+					elements[0] = []byte("none")
 				}
 				if !canTestHash {
 					elements[1] = []byte("")
@@ -3070,6 +3103,7 @@ func testLoggerVsLsf(ctx context.Context, fdst, fsrc fs.Fs, logger *bytes.Buffer
 
 	if fsrc.Precision() == fdst.Precision() && fsrc.Hashes().Contains(hash.MD5) && canTestHash {
 		lsf := DstLsf(ctx, fdst)
+		blankMissingHashes(&newlogger, lsf)
 		err := LoggerMatchesLsf(&newlogger, lsf)
 		require.NoError(t, err)
 	}
@@ -3141,4 +3175,32 @@ func TestSyncListOrderRandomStable(t *testing.T) {
 	assert.Equal(t, got1, got2)
 	assert.ElementsMatch(t, expected, got1)
 	assert.NotEqual(t, expected, got1)
+}
+
+// blankMissingHashes clears the hash in logger lines for paths where
+// the lsf listing has an empty hash. An empty hash from a backend
+// means the hash is unknown, not wrong - for example ownCloud does
+// not carry the checksum over on a server-side copy - so it should
+// not be compared against the hash the logger predicted.
+func blankMissingHashes(logger, lsf *bytes.Buffer) {
+	noHash := map[string]bool{}
+	for _, line := range bytes.Split(lsf.Bytes(), []byte("\n")) {
+		elements := bytes.SplitN(line, []byte(";"), 4)
+		if len(elements) == 4 && len(elements[1]) == 0 {
+			noHash[string(elements[3])] = true
+		}
+	}
+	if len(noHash) == 0 {
+		return
+	}
+	loggerSplit := bytes.Split(logger.Bytes(), []byte("\n"))
+	for i, line := range loggerSplit {
+		elements := bytes.SplitN(line, []byte(";"), 4)
+		if len(elements) == 4 && noHash[string(elements[3])] {
+			elements[1] = nil
+			loggerSplit[i] = bytes.Join(elements, []byte(";"))
+		}
+	}
+	logger.Reset()
+	logger.Write(bytes.Join(loggerSplit, []byte("\n")))
 }

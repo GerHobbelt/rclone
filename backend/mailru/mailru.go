@@ -400,7 +400,7 @@ type quirks struct {
 }
 
 func (q *quirks) parseQuirks(option string) {
-	for _, flag := range strings.Split(option, ",") {
+	for flag := range strings.SplitSeq(option, ",") {
 		switch strings.ToLower(strings.TrimSpace(flag)) {
 		case "binlist":
 			// The official client sometimes uses a so called "bin" protocol,
@@ -634,7 +634,7 @@ func (f *Fs) readItemMetaData(ctx context.Context, path string) (entry fs.DirEnt
 	return
 }
 
-// itemToEntry converts API item to rclone directory entry
+// itemToDirEntry converts API item to rclone directory entry
 // The dirSize return value is:
 //
 //	<0 - for a file or in case of error
@@ -1733,7 +1733,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 	o.mrHash = newHash
 	o.size = size
-	o.modTime = src.ModTime(ctx)
+	// The server stores modtimes with second precision so truncate
+	// here too to keep the in-memory modtime identical to the one a
+	// fresh listing returns.
+	o.modTime = src.ModTime(ctx).Truncate(time.Second)
 	return o.addFileMetaData(ctx, true)
 }
 
@@ -1770,7 +1773,7 @@ func (f *Fs) parseSpeedupPatterns(patternString string) (err error) {
 	f.speedupAny = false
 	uniqueValidPatterns := make(map[string]any)
 
-	for _, pattern := range strings.Split(patternString, ",") {
+	for pattern := range strings.SplitSeq(patternString, ",") {
 		pattern = strings.ToLower(strings.TrimSpace(pattern))
 		if pattern == "" {
 			continue
@@ -2036,7 +2039,11 @@ func (o *Object) Storable() bool {
 // Commits the datastore
 func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 	// fs.Debugf(o, ">>> SetModTime [%v]", modTime)
-	o.modTime = modTime
+	//
+	// The server stores modtimes with second precision so truncate
+	// here too to keep the in-memory modtime identical to the one a
+	// fresh listing returns.
+	o.modTime = modTime.Truncate(time.Second)
 	return o.addFileMetaData(ctx, true)
 }
 

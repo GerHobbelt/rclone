@@ -60,6 +60,17 @@ func prepareServer(t *testing.T) configmap.Simple {
 		what := fmt.Sprintf("%s %s: Header ", r.Method, r.URL.Path)
 		assert.Equal(t, headers[1], r.Header.Get(headers[0]), what+headers[0])
 		assert.Equal(t, headers[3], r.Header.Get(headers[2]), what+headers[2])
+
+		// Set the content disposition header for the fifth file
+		// later we will check if it is set using the metadata method
+		if r.URL.Path == "/five.txt.gz" {
+			w.Header().Set("Content-Disposition", "attachment; filename=\"five.txt.gz\"")
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Content-Language", "en-US")
+			w.Header().Set("Content-Encoding", "gzip")
+		}
+
 		fileServer.ServeHTTP(w, r)
 	})
 
@@ -102,27 +113,33 @@ func testListRoot(t *testing.T, f fs.Fs, noSlash bool) {
 
 	sort.Sort(entries)
 
-	require.Equal(t, 4, len(entries))
+	require.Equal(t, 5, len(entries))
 
 	e := entries[0]
-	assert.Equal(t, "four", e.Remote())
+	assert.Equal(t, "five.txt.gz", e.Remote())
 	assert.Equal(t, int64(-1), e.Size())
-	_, ok := e.(fs.Directory)
+	_, ok := e.(fs.Object)
 	assert.True(t, ok)
 
 	e = entries[1]
+	assert.Equal(t, "four", e.Remote())
+	assert.Equal(t, int64(-1), e.Size())
+	_, ok = e.(fs.Directory)
+	assert.True(t, ok)
+
+	e = entries[2]
 	assert.Equal(t, "one%.txt", e.Remote())
 	assert.Equal(t, int64(5+lineEndSize), e.Size())
 	_, ok = e.(*Object)
 	assert.True(t, ok)
 
-	e = entries[2]
+	e = entries[3]
 	assert.Equal(t, "three", e.Remote())
 	assert.Equal(t, int64(-1), e.Size())
 	_, ok = e.(fs.Directory)
 	assert.True(t, ok)
 
-	e = entries[3]
+	e = entries[4]
 	assert.Equal(t, "two.html", e.Remote())
 	if noSlash {
 		assert.Equal(t, int64(-1), e.Size())
@@ -218,6 +235,23 @@ func TestNewObjectWithLeadingSlash(t *testing.T) {
 	assert.Equal(t, fs.ErrorObjectNotFound, err)
 }
 
+func TestNewObjectWithMetadata(t *testing.T) {
+	f := prepare(t)
+	o, err := f.NewObject(context.Background(), "/five.txt.gz")
+	require.NoError(t, err)
+	assert.Equal(t, "five.txt.gz", o.Remote())
+	ho, ok := o.(*Object)
+	assert.True(t, ok)
+	metadata, err := ho.Metadata(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "text/plain; charset=utf-8", metadata["content-type"])
+	assert.Equal(t, "attachment; filename=\"five.txt.gz\"", metadata["content-disposition"])
+	assert.Equal(t, "five.txt.gz", metadata["content-disposition-filename"])
+	assert.Equal(t, "no-cache", metadata["cache-control"])
+	assert.Equal(t, "en-US", metadata["content-language"])
+	assert.Equal(t, "gzip", metadata["content-encoding"])
+}
+
 func TestOpen(t *testing.T) {
 	m := prepareServer(t)
 
@@ -297,7 +331,19 @@ func TestIsAFileRoot(t *testing.T) {
 	f, err := NewFs(context.Background(), remoteName, "one%.txt", m)
 	assert.Equal(t, err, fs.ErrorIsFile)
 
-	testListRoot(t, f, false)
+	entries, err := f.List(context.Background(), "")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, len(entries))
+
+	e := entries[0]
+	assert.Equal(t, "one%.txt", e.Remote())
+	assert.Equal(t, int64(5+lineEndSize), e.Size())
+	_, ok := e.(*Object)
+	assert.True(t, ok)
+
+	_, err = f.List(context.Background(), "anysub")
+	assert.Equal(t, fs.ErrorDirNotFound, err)
 }
 
 func TestIsAFileSubDir(t *testing.T) {

@@ -69,6 +69,10 @@ func init() {
 			Required:   true,
 			IsPassword: true,
 		}, {
+			Name:     "2fa",
+			Help:     `The 2FA code of your MEGA account if the account is set up with one`,
+			Required: false,
+		}, {
 			Name: "debug",
 			Help: `Output more debug from Mega.
 
@@ -116,6 +120,7 @@ Enabling it will increase CPU usage and add network overhead.`,
 type Options struct {
 	User       string               `config:"user"`
 	Pass       string               `config:"pass"`
+	TwoFA      string               `config:"2fa"`
 	Debug      bool                 `config:"debug"`
 	HardDelete bool                 `config:"hard_delete"`
 	UseHTTPS   bool                 `config:"use_https"`
@@ -213,6 +218,19 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	ci := fs.GetConfig(ctx)
 
+	// Create Fs
+	root = parsePath(root)
+	f := &Fs{
+		name:  name,
+		root:  root,
+		opt:   *opt,
+		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+	}
+	f.features = (&fs.Features{
+		DuplicateFiles:          true,
+		CanHaveEmptyDirectories: true,
+	}).Fill(ctx, f)
+
 	// cache *mega.Mega on username so we can reuse and share
 	// them between remotes.  They are expensive to make as they
 	// contain all the objects and sharing the objects makes the
@@ -240,25 +258,17 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 			})
 		}
 
-		err := srv.Login(opt.User, opt.Pass)
+		fs.Debugf(f, "Using username and password to initialize the Mega API")
+		err := srv.MultiFactorLogin(opt.User, opt.Pass, opt.TwoFA)
 		if err != nil {
 			return nil, fmt.Errorf("couldn't login: %w", err)
 		}
+		// Cache the session so all Fs instances of this user share
+		// it - the move code relies on all objects being in the same
+		// in-memory tree.
 		megaCache[opt.User] = srv
 	}
-
-	root = parsePath(root)
-	f := &Fs{
-		name:  name,
-		root:  root,
-		opt:   *opt,
-		srv:   srv,
-		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-	}
-	f.features = (&fs.Features{
-		DuplicateFiles:          true,
-		CanHaveEmptyDirectories: true,
-	}).Fill(ctx, f)
+	f.srv = srv
 
 	// Find the root node and check if it is a file or not
 	_, err = f.findRoot(ctx, false)
@@ -740,6 +750,8 @@ func (f *Fs) move(ctx context.Context, dstRemote string, srcFs *Fs, srcRemote st
 		return fmt.Errorf("server-side move failed to lookup src parent dir: %w", err)
 	}
 
+	waitEvent := f.srv.WaitEventsStart()
+
 	// move the object into its new directory if required
 	if srcDirNode != dstDirNode && srcDirNode.GetHash() != dstDirNode.GetHash() {
 		//log.Printf("move src %p %q dst %p %q", srcDirNode, srcDirNode.GetName(), dstDirNode, dstDirNode.GetName())
@@ -751,8 +763,6 @@ func (f *Fs) move(ctx context.Context, dstRemote string, srcFs *Fs, srcRemote st
 			return fmt.Errorf("server-side move failed: %w", err)
 		}
 	}
-
-	waitEvent := f.srv.WaitEventsStart()
 
 	// rename the object if required
 	if srcLeaf != dstLeaf {
@@ -938,9 +948,9 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 		return nil, fmt.Errorf("failed to get Mega Quota: %w", err)
 	}
 	usage := &fs.Usage{
-		Total: fs.NewUsageValue(int64(q.Mstrg)),           // quota of bytes that can be used
-		Used:  fs.NewUsageValue(int64(q.Cstrg)),           // bytes in use
-		Free:  fs.NewUsageValue(int64(q.Mstrg - q.Cstrg)), // bytes which can be uploaded before reaching the quota
+		Total: fs.NewUsageValue(q.Mstrg),           // quota of bytes that can be used
+		Used:  fs.NewUsageValue(q.Cstrg),           // bytes in use
+		Free:  fs.NewUsageValue(q.Mstrg - q.Cstrg), // bytes which can be uploaded before reaching the quota
 	}
 	return usage, nil
 }
@@ -1186,6 +1196,8 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		}
 	}
 
+	waitEvent := o.fs.srv.WaitEventsStart()
+
 	// Finish the upload
 	var info *mega.Node
 	err = o.fs.pacer.Call(func() (bool, error) {
@@ -1205,15 +1217,23 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		o.info = nil
 	}
 
+	// Wait for the server to confirm the new file
+	o.fs.srv.WaitEvents(waitEvent, eventWaitTime)
+
 	return o.setMetaData(info)
 }
 
 // Remove an object
 func (o *Object) Remove(ctx context.Context) error {
+	waitEvent := o.fs.srv.WaitEventsStart()
+
 	err := o.fs.deleteNode(ctx, o.info)
 	if err != nil {
 		return fmt.Errorf("Remove object failed: %w", err)
 	}
+
+	// Wait for the server to confirm the deletion
+	o.fs.srv.WaitEvents(waitEvent, eventWaitTime)
 	return nil
 }
 

@@ -115,10 +115,10 @@ func checkHashes(ctx context.Context, src fs.ObjectInfo, dst fs.Object, ht hash.
 	if srcHash != dstHash {
 		fs.Debugf(src, "%v = %s (%v)", ht, srcHash, src.Fs())
 		fs.Debugf(dst, "%v = %s (%v)", ht, dstHash, dst.Fs())
-	} else {
-		fs.Debugf(src, "%v = %s OK", ht, srcHash)
+		return false, ht, srcHash, dstHash, nil
 	}
-	return srcHash == dstHash, ht, srcHash, dstHash, nil
+	fs.Debugf(src, "%v = %s OK", ht, srcHash)
+	return true, ht, srcHash, dstHash, nil
 }
 
 // Equal checks to see if the src and dst objects are equal by looking at
@@ -184,7 +184,13 @@ func sizeDiffers(ctx context.Context, src, dst fs.ObjectInfo) bool {
 	if ci.IgnoreSize || src.Size() < 0 || dst.Size() < 0 {
 		return false
 	}
-	return src.Size() != dst.Size()
+	if src.Size() == dst.Size() {
+		fs.Debugf(dst, "size = %d OK", dst.Size())
+		return false
+	}
+	fs.Debugf(src, "size = %d (%v)", src.Size(), src.Fs())
+	fs.Debugf(dst, "size = %d (%v)", dst.Size(), dst.Fs())
+	return true
 }
 
 var checksumWarning sync.Once
@@ -241,7 +247,7 @@ func equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object, opt equalOpt) 
 	ci := fs.GetConfig(ctx)
 	logger, _ := GetLogger(ctx)
 	if sizeDiffers(ctx, src, dst) {
-		fs.Debugf(src, "Sizes differ (src %d vs dst %d)", src.Size(), dst.Size())
+		fs.Debug(src, "Sizes differ")
 		logger(ctx, Differ, src, dst, nil)
 		return false
 	}
@@ -410,7 +416,9 @@ func SameObject(src, dst fs.Object) bool {
 // It returns the destination object if possible.  Note that this may
 // be nil.
 //
-// This is accounted as a check.
+// This is accounted as a check, unless Move falls back to Copy + Delete
+// (on backends without server-side move), in which case the Copy is
+// accounted as a transfer.
 func Move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.Object) (newDst fs.Object, err error) {
 	return move(ctx, fdst, dst, remote, src, false)
 }
@@ -448,6 +456,10 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
 	origRemote := remote // avoid double-transform on fallback to copy
 	remote = transform.Path(ctx, remote, false)
 	ci := fs.GetConfig(ctx)
+	newDst = dst
+	if ci.DryRun && dst != nil && SameObject(src, dst) && src.Remote() == transform.Path(ctx, dst.Remote(), false) {
+		return // avoid SkipDestructive log for objects that won't really be moved
+	}
 	var tr *accounting.Transfer
 	if isTransfer {
 		tr = accounting.Stats(ctx).NewTransfer(src, fdst)
@@ -460,8 +472,11 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
 		}
 		tr.Done(ctx, err)
 	}()
-	newDst = dst
-	if SkipDestructive(ctx, src, "move") {
+	action := "move"
+	if remote != src.Remote() {
+		action += " to " + remote
+	}
+	if SkipDestructive(ctx, src, action) {
 		in := tr.Account(ctx, nil)
 		in.DryRun(src.Size())
 		return newDst, nil
@@ -513,6 +528,9 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
 		}
 	}
 	// Move not found or didn't work so copy dst <- src
+	if origRemote != remote {
+		dst = nil
+	}
 	newDst, err = Copy(ctx, fdst, dst, origRemote, src)
 	if err != nil {
 		fs.Errorf(src, "Not deleting source as copy failed: %v", err)
@@ -550,7 +568,11 @@ func SuffixName(ctx context.Context, remote string) string {
 // and accumulating stats and errors.
 //
 // If backupDir is set then it moves the file to there instead of
-// deleting
+// deleting.
+//
+// Use BackupDir to find backupDir from --backup-dir. That lookup is
+// relatively expensive, so when deleting many files do it once outside
+// the loop rather than calling it for every object.
 func DeleteFileWithBackupDir(ctx context.Context, dst fs.Object, backupDir fs.Fs) (err error) {
 	tr := accounting.Stats(ctx).NewCheckingTransfer(dst, "deleting")
 	defer func() {
@@ -583,8 +605,8 @@ func DeleteFileWithBackupDir(ctx context.Context, dst fs.Object, backupDir fs.Fs
 
 // DeleteFile deletes a single file respecting --dry-run and accumulating stats and errors.
 //
-// If useBackupDir is set and --backup-dir is in effect then it moves
-// the file to there instead of deleting
+// DeleteFile does not honour --backup-dir: it always deletes. Call
+// DeleteFileWithBackupDir instead if --backup-dir support is required.
 func DeleteFile(ctx context.Context, dst fs.Object) (err error) {
 	return DeleteFileWithBackupDir(ctx, dst, nil)
 }
@@ -1825,8 +1847,12 @@ func RcatSize(ctx context.Context, fdst fs.Fs, dstFileName string, in io.ReadClo
 			return nil, err
 		}
 
+		var options []fs.OpenOption
+		for _, option := range fs.GetConfig(ctx).UploadHeaders {
+			options = append(options, option)
+		}
 		info := object.NewStaticObjectInfo(dstFileName, modTime, size, true, nil, fdst).WithMetadata(meta)
-		obj, err = fdst.Put(ctx, in, info)
+		obj, err = fdst.Put(ctx, in, info, options...)
 		if err != nil {
 			fs.Errorf(dstFileName, "Post request put error: %v", err)
 
@@ -1851,7 +1877,14 @@ type copyURLFunc func(ctx context.Context, dstFileName string, in io.ReadCloser,
 // copyURLFn copies the data from the url to the function supplied
 func copyURLFn(ctx context.Context, dstFileName string, url string, autoFilename, dstFileNameFromHeader bool, fn copyURLFunc) (err error) {
 	client := fshttp.NewClient(ctx)
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	for _, option := range fs.GetConfig(ctx).DownloadHeaders {
+		req.Header.Set(option.Key, option.Value)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -1956,6 +1989,9 @@ func MoveBackupDir(ctx context.Context, backupDir fs.Fs, dst fs.Object) (err err
 func needsMoveCaseInsensitive(fdst fs.Fs, fsrc fs.Fs, dstFileName string, srcFileName string, cp bool) bool {
 	dstFilePath := path.Join(fdst.Root(), dstFileName)
 	srcFilePath := path.Join(fsrc.Root(), srcFileName)
+	if !cp && fdst.Name() == fsrc.Name() && dstFileName != srcFileName && norm.NFC.String(dstFilePath) == norm.NFC.String(srcFilePath) {
+		return true
+	}
 	return !cp && fdst.Name() == fsrc.Name() && fdst.Features().CaseInsensitive && dstFileName != srcFileName && strings.EqualFold(dstFilePath, srcFilePath)
 }
 
@@ -2226,14 +2262,25 @@ func (l *ListFormat) SetOutput(output []func(entry *ListJSONItem) string) {
 
 // AddModTime adds file's Mod Time to output
 func (l *ListFormat) AddModTime(timeFormat string) {
-	if timeFormat == "" {
-		timeFormat = "2006-01-02 15:04:05"
-	} else {
+	switch timeFormat {
+	case "":
+		l.AppendOutput(func(entry *ListJSONItem) string {
+			return entry.ModTime.When.Local().Format("2006-01-02 15:04:05")
+		})
+	case "unix":
+		l.AppendOutput(func(entry *ListJSONItem) string {
+			return fmt.Sprint(entry.ModTime.When.Unix())
+		})
+	case "unixnano":
+		l.AppendOutput(func(entry *ListJSONItem) string {
+			return fmt.Sprint(entry.ModTime.When.UnixNano())
+		})
+	default:
 		timeFormat = transform.TimeFormat(timeFormat)
+		l.AppendOutput(func(entry *ListJSONItem) string {
+			return entry.ModTime.When.Local().Format(timeFormat)
+		})
 	}
-	l.AppendOutput(func(entry *ListJSONItem) string {
-		return entry.ModTime.When.Local().Format(timeFormat)
-	})
 }
 
 // AddSize adds file's size to output
