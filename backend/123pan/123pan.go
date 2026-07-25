@@ -1,48 +1,61 @@
-// Package _123pan provides an interface to the 123Pan Open API.
+// Package _123pan provides an interface to the ordinary 123Pan web API.
 package _123pan
 
 import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
-	"mime/multipart"
+	"math"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	awss3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/rclone/rclone/backend/123pan/api"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
+	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/dircache"
 	"github.com/rclone/rclone/lib/encoder"
-	"github.com/rclone/rclone/lib/oauthutil"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/rest"
-	"golang.org/x/oauth2"
 )
 
 const (
-	apiRootURL             = "https://open-api.123pan.com"
-	defaultTokenServer     = "https://api.oplist.org/123cloud/renewapi"
-	platformHeader         = "open_platform"
+	apiRootURL             = "https://yun.123pan.com/b/api"
+	apiPathPrefix          = "/b/api"
+	loginRootURL           = "https://login.123pan.com/api"
+	defaultPlatform        = "web"
+	webOrigin              = "https://yun.123pan.com"
+	webUserAgent           = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) openlist-client"
 	rootID                 = "0"
 	defaultHashMemoryLimit = 16 * fs.Mebi
-	maxUploadSize          = 10 * fs.Gibi
 	minSleep               = 200 * time.Millisecond
 	maxSleep               = 2 * time.Second
-	completionAttempts     = 60
+	copyPollInterval       = time.Second
+	copyPollAttempts       = 120
+	s3PartSize             = 16 * fs.Mebi
+	s3SinglePutSize        = 5 * fs.Gibi
 	defaultEncoding        = encoder.EncodeSlash |
 		encoder.EncodeBackSlash |
 		encoder.EncodeColon |
@@ -58,19 +71,23 @@ const (
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "123pan",
-		Description: "123Pan Open Platform",
+		Description: "123Pan",
 		NewFs:       NewFs,
 		Config:      Config,
 		Options: []fs.Option{{
-			Name:      fs.ConfigToken,
-			Help:      "Rotating 123Pan token state. Set automatically by `rclone config reconnect`.",
-			Advanced:  true,
+			Name:      "username",
+			Help:      "123Pan account email address or phone number.",
+			Required:  true,
 			Sensitive: true,
-			Hide:      fs.OptionHideBoth,
 		}, {
-			Name:     "token_server",
-			Help:     "Online API used to exchange the rotating refresh token.",
-			Default:  defaultTokenServer,
+			Name:       "password",
+			Help:       "123Pan account password.",
+			Required:   true,
+			IsPassword: true,
+		}, {
+			Name:     "platform",
+			Help:     "Platform header sent with ordinary 123Pan web API requests.",
+			Default:  defaultPlatform,
 			Advanced: true,
 		}, {
 			Name:     "hash_memory_limit",
@@ -95,7 +112,9 @@ The source must be seekable or reopenable. rclone returns an error rather than s
 
 // Options defines the configuration for this backend.
 type Options struct {
-	TokenServer     string               `config:"token_server"`
+	Username        string               `config:"username"`
+	Password        string               `config:"password"`
+	Platform        string               `config:"platform"`
 	HashMemoryLimit fs.SizeSuffix        `config:"hash_memory_limit"`
 	NoBuffer        bool                 `config:"no_buffer"`
 	Enc             encoder.MultiEncoder `config:"encoding"`
@@ -108,11 +127,14 @@ type Fs struct {
 	opt         Options
 	features    *fs.Features
 	srv         *rest.Client
+	loginSrv    *rest.Client
 	downloadSrv *rest.Client
 	dirCache    *dircache.DirCache
 	pacer       *fs.Pacer
-	token       *oauthutil.RotatingTokenSource
-	renewer     *oauthutil.RotatingRenew
+	authMu      sync.Mutex
+	accessToken string
+	generation  uint64
+	copyDelay   time.Duration
 }
 
 // Object represents a 123Pan file.
@@ -124,40 +146,48 @@ type Object struct {
 	size    int64
 	md5sum  string
 	modTime time.Time
+	s3Key   string
 }
 
-// Config asks for a fresh rotating refresh token during initial setup and
-// explicit reconnect. It deliberately never attempts recovery implicitly.
+// Config asks for ordinary 123Pan web credentials during initial setup and
+// explicit reconnect.
 func Config(ctx context.Context, name string, m configmap.Mapper, configIn fs.ConfigIn) (*fs.ConfigOut, error) {
 	switch configIn.State {
 	case "":
-		if token, ok := m.Get(fs.ConfigToken); ok && token != "" {
-			return fs.ConfigConfirm("replace_token", false, "config_replace_token", "Replace the saved 123Pan refresh token?")
+		if username, _ := m.Get("username"); username != "" {
+			return fs.ConfigConfirm("replace", false, "config_replace", "Replace the saved 123Pan credentials?")
 		}
-		return fs.ConfigInput("refresh_token", "config_refresh_token", "Enter a fresh 123Pan refresh token. It will be sent to the configured token server.")
-	case "replace_token":
+		return fs.ConfigInput("username", "config_username", "123Pan account email address or phone number")
+	case "replace":
 		if configIn.Result != "true" {
 			return nil, nil
 		}
-		return fs.ConfigInput("refresh_token", "config_refresh_token", "Enter a fresh 123Pan refresh token. It will be sent to the configured token server.")
-	case "refresh_token":
-		refreshToken := strings.TrimSpace(configIn.Result)
-		if refreshToken == "" {
-			return fs.ConfigError("", "Refresh token cannot be empty")
+		return fs.ConfigInput("username", "config_username", "123Pan account email address or phone number")
+	case "username":
+		username := strings.TrimSpace(configIn.Result)
+		if username == "" {
+			return fs.ConfigError("", "123Pan username cannot be empty")
 		}
+		m.Set("username", username)
+		return fs.ConfigPassword("password", "config_password", "123Pan account password")
+	case "password":
+		if configIn.Result == "" {
+			return fs.ConfigError("", "123Pan password cannot be empty")
+		}
+		m.Set("password", obscure.MustObscure(configIn.Result))
 		opt := new(Options)
 		if err := configstruct.Set(m, opt); err != nil {
 			return nil, err
 		}
-		if opt.TokenServer == "" {
-			opt.TokenServer = defaultTokenServer
+		if opt.Platform == "" {
+			opt.Platform = defaultPlatform
 		}
 		backend := &Fs{
-			opt: *opt,
-			srv: rest.NewClient(fshttp.NewClient(ctx)).SetRoot(apiRootURL),
+			opt:      *opt,
+			loginSrv: rest.NewClient(fshttp.NewClient(ctx)).SetRoot(loginRootURL),
 		}
-		if _, _, err := oauthutil.ReconnectRotatingToken(ctx, name, m, &oauth2.Token{RefreshToken: refreshToken}, backend.exchangeToken); err != nil {
-			return nil, fmt.Errorf("reconnect 123Pan refresh token: %w", err)
+		if _, _, err := backend.session(ctx); err != nil {
+			return nil, fmt.Errorf("sign in to 123Pan: %w", err)
 		}
 		return nil, nil
 	default:
@@ -172,33 +202,40 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err := configstruct.Set(m, opt); err != nil {
 		return nil, err
 	}
-	if opt.TokenServer == "" {
-		opt.TokenServer = defaultTokenServer
+	if strings.TrimSpace(opt.Username) == "" || strings.TrimSpace(opt.Password) == "" {
+		return nil, errors.New("123Pan username and password must be configured")
+	}
+	if opt.Platform == "" {
+		opt.Platform = defaultPlatform
 	}
 	f := &Fs{
 		name:        name,
 		root:        root,
 		opt:         *opt,
 		srv:         rest.NewClient(fshttp.NewClient(ctx)).SetRoot(apiRootURL),
+		loginSrv:    rest.NewClient(fshttp.NewClient(ctx)).SetRoot(loginRootURL),
 		downloadSrv: rest.NewClient(fshttp.NewClient(ctx)),
 		pacer:       fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep))),
+		copyDelay:   copyPollInterval,
 	}
-	token, err := oauthutil.NewRotatingTokenSource(ctx, name, m, f.exchangeToken)
-	if err != nil {
-		return nil, fmt.Errorf("123Pan token: %w", err)
-	}
-	f.token = token
-	f.renewer = oauthutil.NewRotatingRenew(ctx, name, token)
 	f.dirCache = dircache.New(root, rootID, f)
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
 	}).Fill(ctx, f)
 
-	if err = f.dirCache.FindRoot(ctx, false); err != nil {
+	if err := f.dirCache.FindRoot(ctx, false); err != nil {
 		newRoot, remote := dircache.SplitPath(root)
-		tempF := *f
-		tempF.dirCache = dircache.New(newRoot, rootID, &tempF)
-		tempF.root = newRoot
+		tempF := &Fs{
+			name:        f.name,
+			root:        newRoot,
+			opt:         f.opt,
+			srv:         f.srv,
+			loginSrv:    f.loginSrv,
+			downloadSrv: f.downloadSrv,
+			pacer:       f.pacer,
+			copyDelay:   f.copyDelay,
+		}
+		tempF.dirCache = dircache.New(newRoot, rootID, tempF)
 		if err = tempF.dirCache.FindRoot(ctx, false); err != nil {
 			return f, nil
 		}
@@ -208,7 +245,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 			}
 			return nil, err
 		}
-		f.features.Fill(ctx, &tempF)
+		f.features.Fill(ctx, tempF)
 		f.dirCache = tempF.dirCache
 		f.root = tempF.root
 		return f, fs.ErrorIsFile
@@ -256,123 +293,151 @@ type apiResponse interface {
 	IsAuthenticationFailure() bool
 }
 
-type tokenExchangeResponse struct {
-	AccessToken      string `json:"access_token"`
-	RefreshToken     string `json:"refresh_token"`
-	ExpiresIn        int64  `json:"expires_in"`
-	Code             int    `json:"code"`
-	ErrorDescription string `json:"error_description"`
-	Error            string `json:"error"`
-	Message          string `json:"message"`
-	Text             string `json:"text"`
+// session returns the current web session, logging in when none has been
+// established yet.
+func (f *Fs) session(ctx context.Context) (string, uint64, error) {
+	f.authMu.Lock()
+	defer f.authMu.Unlock()
+	if f.accessToken != "" {
+		return f.accessToken, f.generation, nil
+	}
+	return f.loginLocked(ctx)
 }
 
-// exchangeToken obtains the next access and refresh token from the agreed
-// OpenList-compatible online API. Any unclassified failure is deliberately
-// left ambiguous for the rotating-token protocol to fail closed.
-func (f *Fs) exchangeToken(ctx context.Context, refreshToken string) (*oauth2.Token, error) {
-	if f.srv == nil {
-		return nil, errors.New("123Pan API client is not initialized")
+// loginLocked signs in with the configured ordinary 123Pan credentials.
+//
+// f.authMu must be held by the caller.
+func (f *Fs) loginLocked(ctx context.Context) (string, uint64, error) {
+	if f.loginSrv == nil {
+		return "", 0, errors.New("123Pan login client is not initialized")
 	}
-	var response tokenExchangeResponse
-	resp, err := f.srv.CallJSON(ctx, &rest.Opts{
-		Method:     http.MethodGet,
-		RootURL:    f.opt.TokenServer,
-		NoRedirect: true,
-		// A single-hop fresh connection keeps dial and TLS failures pre-request.
-		Close: true,
-		Parameters: url.Values{
-			"refresh_ui": {refreshToken},
-			"server_use": {"true"},
-			"driver_txt": {"123cloud_oa"},
-		},
-	}, nil, &response)
+	password, err := obscure.Reveal(f.opt.Password)
 	if err != nil {
-		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-			return nil, oauthutil.NewExchangeError(oauthutil.ExchangeFailureReauthenticationRequired, err)
+		return "", 0, fmt.Errorf("reveal 123Pan password: %w", err)
+	}
+	username := strings.TrimSpace(f.opt.Username)
+	if username == "" || password == "" {
+		return "", 0, errors.New("123Pan username and password must be configured")
+	}
+	body := &api.LoginRequest{
+		Passport: username,
+		Password: password,
+		Remember: true,
+	}
+	if strings.Contains(username, "@") {
+		body = &api.LoginRequest{
+			Mail:     username,
+			Password: password,
+			Type:     2,
 		}
-		return nil, oauthutil.ClassifyExchangeTransportError(err)
 	}
-	message := response.ErrorDescription
-	if message == "" {
-		message = response.Error
+	var response api.LoginResponse
+	_, err = f.loginSrv.CallJSON(ctx, &rest.Opts{
+		Method: http.MethodPost,
+		Path:   "/user/sign_in",
+		ExtraHeaders: map[string]string{
+			"Origin":      webOrigin,
+			"Referer":     webOrigin + "/",
+			"User-Agent":  webUserAgent,
+			"Platform":    defaultPlatform,
+			"App-Version": "3",
+		},
+	}, body, &response)
+	if err != nil {
+		return "", 0, err
 	}
-	if message == "" {
-		message = response.Message
-	}
-	if message == "" {
-		message = response.Text
-	}
-	if response.Code == http.StatusUnauthorized || response.Code == http.StatusForbidden {
-		if message == "" {
-			message = "online token API rejected the refresh token"
+	if response.Code != http.StatusOK || response.Data.Token == "" {
+		if response.Message == "" {
+			response.Message = "ordinary 123Pan login returned no session token"
 		}
-		return nil, oauthutil.NewExchangeError(oauthutil.ExchangeFailureReauthenticationRequired, errors.New(message))
+		return "", 0, errors.New(response.Message)
 	}
-	if response.Code != 0 || response.AccessToken == "" || response.RefreshToken == "" || response.ExpiresIn <= 0 {
-		if message == "" {
-			message = "online token API returned an incomplete token"
-		}
-		return nil, errors.New(message)
-	}
-	return &oauth2.Token{
-		AccessToken:  response.AccessToken,
-		TokenType:    "Bearer",
-		RefreshToken: response.RefreshToken,
-		Expiry:       time.Now().Add(time.Duration(response.ExpiresIn) * time.Second),
-	}, nil
+	f.accessToken = response.Data.Token
+	f.generation++
+	return f.accessToken, f.generation, nil
 }
 
+// refreshSessionIfCurrent establishes a new session only when generation is
+// still the session that received an authentication failure.
+func (f *Fs) refreshSessionIfCurrent(ctx context.Context, generation uint64) (string, uint64, error) {
+	f.authMu.Lock()
+	defer f.authMu.Unlock()
+	if f.accessToken != "" && f.generation != generation {
+		return f.accessToken, f.generation, nil
+	}
+	f.accessToken = ""
+	return f.loginLocked(ctx)
+}
+
+// signPath returns the ordinary web API query parameter used by OpenList's
+// 123 driver.
+func signPath(requestPath string) (string, string) {
+	table := []byte{'a', 'd', 'e', 'f', 'g', 'h', 'l', 'm', 'y', 'i', 'j', 'n', 'o', 'p', 'k', 'q', 'r', 's', 't', 'u', 'b', 'c', 'v', 'w', 's', 'z'}
+	random := fmt.Sprintf("%.f", math.Round(1e7*rand.Float64()))
+	now := time.Now().In(time.FixedZone("CST", 8*60*60))
+	timestamp := strconv.FormatInt(now.Unix(), 10)
+	nowText := []byte(now.Format("200601021504"))
+	for index := range nowText {
+		nowText[index] = table[nowText[index]-'0']
+	}
+	timeSign := strconv.FormatUint(uint64(crc32.ChecksumIEEE(nowText)), 10)
+	data := strings.Join([]string{timestamp, random, requestPath, defaultPlatform, "3", timeSign}, "|")
+	dataSign := strconv.FormatUint(uint64(crc32.ChecksumIEEE([]byte(data))), 10)
+	return timeSign, strings.Join([]string{timestamp, random, dataSign}, "-")
+}
+
+// authOpts adds the ordinary 123Pan session and signed web-request headers.
 func (f *Fs) authOpts(opts *rest.Opts, accessToken string) *rest.Opts {
-	copy := *opts
-	headers := make(map[string]string, len(opts.ExtraHeaders)+2)
+	requestOpts := *opts
+	headers := make(map[string]string, len(opts.ExtraHeaders)+6)
 	for key, value := range opts.ExtraHeaders {
 		headers[key] = value
 	}
 	headers["Authorization"] = "Bearer " + accessToken
-	headers["Platform"] = platformHeader
-	copy.ExtraHeaders = headers
-	return &copy
-}
-
-func (f *Fs) conditionalRefresh(ctx context.Context, generation uint64) error {
-	if f.token == nil {
-		return errors.New("rotating token source is not initialized")
+	headers["Origin"] = webOrigin
+	headers["Referer"] = webOrigin + "/"
+	headers["User-Agent"] = webUserAgent
+	headers["Platform"] = f.opt.Platform
+	headers["App-Version"] = "3"
+	requestOpts.ExtraHeaders = headers
+	parameters := make(url.Values, len(opts.Parameters)+1)
+	for key, values := range opts.Parameters {
+		parameters[key] = append([]string(nil), values...)
 	}
-	_, _, err := f.token.RefreshIfCurrent(ctx, generation)
-	return err
+	key, value := signPath(apiPathPrefix + opts.Path)
+	parameters.Set(key, value)
+	requestOpts.Parameters = parameters
+	return &requestOpts
 }
 
-// retryAuthenticationFailure refreshes a failed token generation at most once.
+// retryAuthenticationFailure establishes a fresh web session at most once for
+// one API request.
 func (f *Fs) retryAuthenticationFailure(ctx context.Context, generation uint64, refreshed *bool) (bool, error) {
 	if *refreshed {
 		return false, nil
 	}
-	if err := f.conditionalRefresh(ctx, generation); err != nil {
+	if _, _, err := f.refreshSessionIfCurrent(ctx, generation); err != nil {
 		return false, err
 	}
 	*refreshed = true
 	return true, nil
 }
 
-// callJSON calls an authenticated Open API endpoint. A 401 refreshes only the
-// generation that issued this request, and it retries the request once.
+// callJSON calls an authenticated ordinary API endpoint. A 401 establishes a
+// new session and retries the request once.
 func (f *Fs) callJSON(ctx context.Context, opts *rest.Opts, request any, response apiResponse) error {
-	if f.token == nil {
-		return errors.New("rotating token source is not initialized")
-	}
 	refreshed := false
 	return f.pacer.Call(func() (bool, error) {
-		token, generation, err := f.token.TokenContext(ctx)
+		accessToken, generation, err := f.session(ctx)
 		if err != nil {
 			return false, err
 		}
-		resp, err := f.srv.CallJSON(ctx, f.authOpts(opts, token.AccessToken), request, response)
+		resp, err := f.srv.CallJSON(ctx, f.authOpts(opts, accessToken), request, response)
 		if err != nil {
 			if resp != nil && resp.StatusCode == http.StatusUnauthorized {
-				retry, refreshErr := f.retryAuthenticationFailure(ctx, generation, &refreshed)
-				if refreshErr != nil {
-					return false, fmt.Errorf("conditional token refresh: %w", refreshErr)
+				retry, loginErr := f.retryAuthenticationFailure(ctx, generation, &refreshed)
+				if loginErr != nil {
+					return false, fmt.Errorf("sign in after 123Pan authentication failure: %w", loginErr)
 				}
 				if retry {
 					return true, nil
@@ -385,9 +450,9 @@ func (f *Fs) callJSON(ctx context.Context, opts *rest.Opts, request any, respons
 		}
 		if err = response.Err(); err != nil {
 			if response.IsAuthenticationFailure() {
-				retry, refreshErr := f.retryAuthenticationFailure(ctx, generation, &refreshed)
-				if refreshErr != nil {
-					return false, fmt.Errorf("conditional token refresh: %w", refreshErr)
+				retry, loginErr := f.retryAuthenticationFailure(ctx, generation, &refreshed)
+				if loginErr != nil {
+					return false, fmt.Errorf("sign in after 123Pan authentication failure: %w", loginErr)
 				}
 				if retry {
 					return true, nil
@@ -421,33 +486,37 @@ func parseFileTime(value string) time.Time {
 
 func (f *Fs) listFiles(ctx context.Context, parentID int64) ([]api.File, error) {
 	var files []api.File
-	lastFileID := int64(0)
-	for pages := 0; ; pages++ {
-		if pages >= 100000 {
+	for page := 1; ; page++ {
+		if page >= 100000 {
 			return nil, errors.New("too many 123Pan file-list pages")
 		}
 		var response api.FileListResponse
 		err := f.callJSON(ctx, &rest.Opts{
 			Method: http.MethodGet,
-			Path:   "/api/v2/file/list",
+			Path:   "/file/list/new",
 			Parameters: url.Values{
-				"parentFileId": {strconv.FormatInt(parentID, 10)},
-				"limit":        {"100"},
-				"lastFileId":   {strconv.FormatInt(lastFileID, 10)},
+				"driveId":              {"0"},
+				"limit":                {"100"},
+				"next":                 {"0"},
+				"orderBy":              {"file_id"},
+				"orderDirection":       {"desc"},
+				"parentFileId":         {strconv.FormatInt(parentID, 10)},
+				"trashed":              {"false"},
+				"SearchData":           {""},
+				"Page":                 {strconv.Itoa(page)},
+				"OnlyLookAbnormalFile": {"0"},
+				"event":                {"homeListFile"},
+				"operateType":          {"4"},
+				"inDirectSpace":        {"false"},
 			},
 		}, nil, &response)
 		if err != nil {
 			return nil, fmt.Errorf("list 123Pan files: %w", err)
 		}
-		for _, file := range response.Data.FileList {
-			if file.Trashed == 0 {
-				files = append(files, file)
-			}
-		}
-		if response.Data.LastFileID == -1 {
+		files = append(files, response.Data.InfoList...)
+		if len(response.Data.InfoList) == 0 || response.Data.Next == "-1" {
 			return files, nil
 		}
-		lastFileID = response.Data.LastFileID
 	}
 }
 
@@ -457,7 +526,7 @@ func (f *Fs) findFile(ctx context.Context, parentID int64, leaf string) (*api.Fi
 		return nil, err
 	}
 	for index := range files {
-		if f.opt.Enc.ToStandardName(files[index].Filename) == leaf {
+		if f.opt.Enc.ToStandardName(files[index].FileName) == leaf {
 			return &files[index], nil
 		}
 	}
@@ -483,13 +552,17 @@ func (f *Fs) CreateDir(ctx context.Context, directoryID, leaf string) (string, e
 	if err != nil {
 		return "", err
 	}
-	var response api.MkdirResponse
+	var response api.UploadResponse
 	err = f.callJSON(ctx, &rest.Opts{
 		Method: http.MethodPost,
-		Path:   "/upload/v1/file/mkdir",
-	}, map[string]any{
-		"name":     f.opt.Enc.FromStandardName(leaf),
-		"parentID": parentID,
+		Path:   "/file/upload_request",
+	}, &api.UploadRequest{
+		DriveID:      0,
+		ETag:         "",
+		FileName:     f.opt.Enc.FromStandardName(leaf),
+		ParentFileID: parentID,
+		Size:         0,
+		Type:         1,
 	}, &response)
 	if err != nil {
 		if id, found, findErr := f.FindLeaf(ctx, directoryID, leaf); findErr == nil && found {
@@ -497,10 +570,10 @@ func (f *Fs) CreateDir(ctx context.Context, directoryID, leaf string) (string, e
 		}
 		return "", fmt.Errorf("create 123Pan directory %q: %w", leaf, err)
 	}
-	if response.Data.DirID == 0 {
+	if response.Data.FileID == 0 {
 		return "", errors.New("123Pan mkdir returned an empty directory ID")
 	}
-	return strconv.FormatInt(response.Data.DirID, 10), nil
+	return strconv.FormatInt(response.Data.FileID, 10), nil
 }
 
 // List lists objects and directories below dir.
@@ -518,15 +591,17 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 		return nil, err
 	}
 	entries := make(fs.DirEntries, 0, len(files))
-	for _, file := range files {
-		remote := path.Join(dir, f.opt.Enc.ToStandardName(file.Filename))
+	for index := range files {
+		file := &files[index]
+		file.ParentFileID = parentID
+		remote := path.Join(dir, f.opt.Enc.ToStandardName(file.FileName))
 		if file.Type == 1 {
 			id := strconv.FormatInt(file.FileID, 10)
 			entries = append(entries, fs.NewDir(remote, parseFileTime(file.UpdateAt)).SetID(id).SetParentID(directoryID))
 			f.dirCache.Put(remote, id)
 			continue
 		}
-		entries = append(entries, f.newObject(remote, &file))
+		entries = append(entries, f.newObject(remote, file))
 	}
 	return entries, nil
 }
@@ -554,6 +629,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	if file.Type == 1 {
 		return nil, fs.ErrorIsDir
 	}
+	file.ParentFileID = parentID
 	return f.newObject(remote, file), nil
 }
 
@@ -610,6 +686,7 @@ func (f *Fs) newObject(remote string, file *api.File) *Object {
 		size:    file.Size,
 		md5sum:  strings.ToLower(file.ETag),
 		modTime: parseFileTime(file.UpdateAt),
+		s3Key:   file.S3KeyFlag,
 	}
 }
 
@@ -623,8 +700,14 @@ func (f *Fs) trash(ctx context.Context, id int64) error {
 	response := new(api.Response)
 	err := f.callJSON(ctx, &rest.Opts{
 		Method: http.MethodPost,
-		Path:   "/api/v1/file/trash",
-	}, map[string]any{"fileIDs": []int64{id}}, response)
+		Path:   "/file/trash",
+	}, &api.TrashRequest{
+		DriveID:   0,
+		Operation: true,
+		FileTrashInfoList: []api.FileID{{
+			FileID: id,
+		}},
+	}, response)
 	if err != nil {
 		return fmt.Errorf("move 123Pan file to recycle bin: %w", err)
 	}
@@ -635,8 +718,12 @@ func (f *Fs) rename(ctx context.Context, id int64, name string) error {
 	response := new(api.Response)
 	err := f.callJSON(ctx, &rest.Opts{
 		Method: http.MethodPost,
-		Path:   "/api/v1/file/rename",
-	}, map[string]any{"renameList": []string{strconv.FormatInt(id, 10) + "|" + f.opt.Enc.FromStandardName(name)}}, response)
+		Path:   "/file/rename",
+	}, &api.RenameRequest{
+		DriveID:  0,
+		FileID:   id,
+		FileName: f.opt.Enc.FromStandardName(name),
+	}, response)
 	if err != nil {
 		return fmt.Errorf("rename 123Pan file: %w", err)
 	}
@@ -647,27 +734,74 @@ func (f *Fs) move(ctx context.Context, id, parentID int64) error {
 	response := new(api.Response)
 	err := f.callJSON(ctx, &rest.Opts{
 		Method: http.MethodPost,
-		Path:   "/api/v1/file/move",
-	}, map[string]any{"fileIDs": []int64{id}, "toParentFileID": parentID}, response)
+		Path:   "/file/mod_pid",
+	}, &api.MoveRequest{
+		FileIDList:   []api.FileID{{FileID: id}},
+		ParentFileID: parentID,
+	}, response)
 	if err != nil {
 		return fmt.Errorf("move 123Pan file: %w", err)
 	}
 	return nil
 }
 
-func (f *Fs) copy(ctx context.Context, id, parentID int64) (int64, error) {
-	var response api.CopyResponse
+func (f *Fs) copy(ctx context.Context, source *Object, parentID int64) error {
+	var response api.CopyStartResponse
 	err := f.callJSON(ctx, &rest.Opts{
 		Method: http.MethodPost,
-		Path:   "/api/v1/file/copy",
-	}, map[string]any{"fileId": id, "targetDirId": parentID}, &response)
+		Path:   "/restful/goapi/v1/file/copy/async",
+	}, &api.CopyRequest{
+		FileList: []api.CopyFile{{
+			FileID:       source.id,
+			Size:         source.size,
+			ETag:         source.md5sum,
+			Type:         0,
+			ParentFileID: source.parent,
+			FileName:     f.opt.Enc.FromStandardName(path.Base(source.remote)),
+			DriveID:      0,
+		}},
+		TargetFileID: parentID,
+	}, &response)
 	if err != nil {
-		return 0, fmt.Errorf("copy 123Pan file: %w", err)
+		return fmt.Errorf("start 123Pan copy task: %w", err)
 	}
-	if response.Data.TargetFileID == 0 {
-		return 0, errors.New("123Pan copy returned an empty target file ID")
+	if response.Data.TaskID == 0 {
+		return errors.New("123Pan copy returned an empty task ID")
 	}
-	return response.Data.TargetFileID, nil
+	for attempt := 0; attempt < copyPollAttempts; attempt++ {
+		var task api.CopyTaskResponse
+		if err = f.callJSON(ctx, &rest.Opts{
+			Method: http.MethodGet,
+			Path:   "/restful/goapi/v1/file/copy/task",
+			Parameters: url.Values{
+				"taskId": {strconv.FormatInt(response.Data.TaskID, 10)},
+			},
+		}, nil, &task); err != nil {
+			return fmt.Errorf("check 123Pan copy task: %w", err)
+		}
+		if task.Data.ErrorCode != 0 {
+			if task.Data.Reason == "" {
+				task.Data.Reason = "123Pan copy task failed"
+			}
+			return fmt.Errorf("%s (error code %d)", task.Data.Reason, task.Data.ErrorCode)
+		}
+		if task.Data.Status == 2 {
+			return nil
+		}
+		if task.Data.Status != 1 {
+			return fmt.Errorf("123Pan copy task returned unexpected status %d", task.Data.Status)
+		}
+		delay := f.copyDelay
+		if delay <= 0 {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return errors.New("123Pan copy task did not finish before the polling deadline")
 }
 
 // Fs returns the filesystem that contains o.
@@ -718,7 +852,7 @@ func (o *Object) ParentID() string {
 	return strconv.FormatInt(o.parent, 10)
 }
 
-// SetModTime reports that the Open API does not support setting modtime.
+// SetModTime reports that the ordinary API does not support setting modtime.
 func (o *Object) SetModTime(context.Context, time.Time) error {
 	return fs.ErrorCantSetModTime
 }
@@ -736,29 +870,52 @@ func (o *Object) Remove(ctx context.Context) error {
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
 	var info api.DownloadInfoResponse
 	if err := o.fs.callJSON(ctx, &rest.Opts{
-		Method: http.MethodGet,
-		Path:   "/api/v1/file/download_info",
-		Parameters: url.Values{
-			"fileId": {strconv.FormatInt(o.id, 10)},
-		},
-	}, nil, &info); err != nil {
+		Method: http.MethodPost,
+		Path:   "/file/download_info",
+	}, &api.DownloadInfoRequest{
+		DriveID:   0,
+		ETag:      o.md5sum,
+		FileID:    o.id,
+		FileName:  o.fs.opt.Enc.FromStandardName(path.Base(o.remote)),
+		S3KeyFlag: o.s3Key,
+		Size:      o.size,
+		Type:      0,
+	}, &info); err != nil {
 		return nil, fmt.Errorf("get 123Pan download URL: %w", err)
 	}
 	if info.Data.DownloadURL == "" {
 		return nil, errors.New("123Pan returned an empty download URL")
 	}
+	downloadURL := info.Data.DownloadURL
+	parsedURL, err := url.Parse(downloadURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse 123Pan download URL: %w", err)
+	}
+	if encodedURL := parsedURL.Query().Get("params"); encodedURL != "" {
+		decodedURL, decodeErr := base64.StdEncoding.DecodeString(encodedURL)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode 123Pan download URL: %w", decodeErr)
+		}
+		if _, parseErr := url.Parse(string(decodedURL)); parseErr != nil {
+			return nil, fmt.Errorf("parse decoded 123Pan download URL: %w", parseErr)
+		}
+		downloadURL = string(decodedURL)
+	}
 	var response *http.Response
-	err := o.fs.pacer.Call(func() (bool, error) {
-		var err error
-		response, err = o.fs.downloadSrv.Call(ctx, &rest.Opts{
+	err = o.fs.pacer.Call(func() (bool, error) {
+		var callErr error
+		response, callErr = o.fs.downloadSrv.Call(ctx, &rest.Opts{
 			Method:  http.MethodGet,
-			RootURL: info.Data.DownloadURL,
+			RootURL: downloadURL,
+			ExtraHeaders: map[string]string{
+				"Referer": fmt.Sprintf("%s://%s/", parsedURL.Scheme, parsedURL.Host),
+			},
 			Options: options,
 		})
-		if err != nil && fserrors.ShouldRetry(err) {
-			return true, err
+		if callErr != nil && fserrors.ShouldRetry(callErr) {
+			return true, callErr
 		}
-		return false, err
+		return false, callErr
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open 123Pan file: %w", err)
@@ -766,71 +923,19 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	return response.Body, nil
 }
 
-func (f *Fs) callMultipart(ctx context.Context, opts *rest.Opts, makeBody func() (io.Reader, string, error)) error {
-	if f.token == nil {
-		return errors.New("rotating token source is not initialized")
-	}
-	refreshed := false
-	return f.pacer.Call(func() (bool, error) {
-		token, generation, err := f.token.TokenContext(ctx)
-		if err != nil {
-			return false, err
-		}
-		body, contentType, err := makeBody()
-		if err != nil {
-			return false, err
-		}
-		callOpts := f.authOpts(opts, token.AccessToken)
-		callOpts.Body = body
-		callOpts.ContentType = contentType
-		resp, err := f.srv.Call(ctx, callOpts)
-		if err != nil {
-			if resp != nil && resp.StatusCode == http.StatusUnauthorized {
-				retry, refreshErr := f.retryAuthenticationFailure(ctx, generation, &refreshed)
-				if refreshErr != nil {
-					return false, fmt.Errorf("conditional token refresh: %w", refreshErr)
-				}
-				if retry {
-					return true, nil
-				}
-			}
-			if fserrors.ShouldRetry(err) {
-				return true, err
-			}
-			return false, err
-		}
-		var response api.Response
-		if err = rest.DecodeJSON(resp, &response); err != nil {
-			return false, err
-		}
-		if err = response.Err(); err != nil {
-			if response.IsAuthenticationFailure() {
-				retry, refreshErr := f.retryAuthenticationFailure(ctx, generation, &refreshed)
-				if refreshErr != nil {
-					return false, fmt.Errorf("conditional token refresh: %w", refreshErr)
-				}
-				if retry {
-					return true, nil
-				}
-			}
-			return false, err
-		}
-		return false, nil
-	})
-}
-
-func (f *Fs) createUpload(ctx context.Context, parentID int64, leaf, md5sum string, size int64) (*api.UploadCreateResponse, error) {
-	var response api.UploadCreateResponse
+func (f *Fs) createUpload(ctx context.Context, parentID int64, leaf, md5sum string, size int64) (*api.UploadResponse, error) {
+	var response api.UploadResponse
 	err := f.callJSON(ctx, &rest.Opts{
 		Method: http.MethodPost,
-		Path:   "/upload/v2/file/create",
-	}, map[string]any{
-		"parentFileID": parentID,
-		"filename":     f.opt.Enc.FromStandardName(leaf),
-		"etag":         strings.ToLower(md5sum),
-		"size":         size,
-		"duplicate":    2,
-		"containDir":   false,
+		Path:   "/file/upload_request",
+	}, &api.UploadRequest{
+		DriveID:      0,
+		Duplicate:    2,
+		ETag:         strings.ToLower(md5sum),
+		FileName:     f.opt.Enc.FromStandardName(leaf),
+		ParentFileID: parentID,
+		Size:         size,
+		Type:         0,
 	}, &response)
 	if err != nil {
 		return nil, fmt.Errorf("create 123Pan upload: %w", err)
@@ -838,71 +943,186 @@ func (f *Fs) createUpload(ctx context.Context, parentID int64, leaf, md5sum stri
 	return &response, nil
 }
 
-func makeSliceBody(preuploadID string, number int, filename string, contents []byte) (io.Reader, string, error) {
-	var buffer bytes.Buffer
-	writer := multipart.NewWriter(&buffer)
-	if err := writer.WriteField("preuploadID", preuploadID); err != nil {
-		return nil, "", err
-	}
-	if err := writer.WriteField("sliceNo", strconv.Itoa(number)); err != nil {
-		return nil, "", err
-	}
-	if err := writer.WriteField("sliceMD5", fmt.Sprintf("%x", md5.Sum(contents))); err != nil {
-		return nil, "", err
-	}
-	part, err := rest.CreateFormFile(writer, "slice", filename+".part"+strconv.Itoa(number), "application/octet-stream")
+func (f *Fs) uploadWithTemporaryS3(ctx context.Context, upload *api.UploadResponse, in io.Reader, size int64) error {
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion("123pan"),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(upload.Data.AccessKeyID, upload.Data.SecretAccessKey, upload.Data.SessionToken)),
+		awsconfig.WithHTTPClient(fshttp.NewClient(ctx)),
+	)
 	if err != nil {
-		return nil, "", err
+		return fmt.Errorf("configure temporary 123Pan S3 upload: %w", err)
 	}
-	if _, err = part.Write(contents); err != nil {
-		return nil, "", err
+	if upload.Data.EndPoint != "" {
+		awsCfg.BaseEndpoint = aws.String(upload.Data.EndPoint)
 	}
-	if err = writer.Close(); err != nil {
-		return nil, "", err
+	awsCfg.RetryMaxAttempts = fs.GetConfig(ctx).LowLevelRetries
+	client := awss3.NewFromConfig(awsCfg, func(options *awss3.Options) {
+		options.UsePathStyle = true
+	})
+	bucket := aws.String(upload.Data.Bucket)
+	key := aws.String(upload.Data.Key)
+	if size <= int64(s3SinglePutSize) {
+		_, err = client.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket:        bucket,
+			Key:           key,
+			Body:          in,
+			ContentLength: aws.Int64(size),
+		})
+		if err != nil {
+			return fmt.Errorf("upload 123Pan temporary S3 object: %w", err)
+		}
+		return nil
 	}
-	return bytes.NewReader(buffer.Bytes()), writer.FormDataContentType(), nil
-}
 
-func (f *Fs) uploadSlice(ctx context.Context, server, preuploadID string, number int, filename string, contents []byte) error {
-	server = strings.TrimRight(server, "/")
-	if server == "" {
-		return errors.New("123Pan upload server is empty")
-	}
-	err := f.callMultipart(ctx, &rest.Opts{
-		Method:  http.MethodPost,
-		RootURL: server,
-		Path:    "/upload/v2/file/slice",
-	}, func() (io.Reader, string, error) {
-		return makeSliceBody(preuploadID, number, f.opt.Enc.FromStandardName(filename), contents)
+	started, err := client.CreateMultipartUpload(ctx, &awss3.CreateMultipartUploadInput{
+		Bucket: bucket,
+		Key:    key,
 	})
 	if err != nil {
-		return fmt.Errorf("upload 123Pan slice %d: %w", number, err)
+		return fmt.Errorf("start 123Pan temporary S3 multipart upload: %w", err)
 	}
+	if started.UploadId == nil || *started.UploadId == "" {
+		return errors.New("123Pan temporary S3 upload returned an empty upload ID")
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			_, _ = client.AbortMultipartUpload(ctx, &awss3.AbortMultipartUploadInput{
+				Bucket:   bucket,
+				Key:      key,
+				UploadId: started.UploadId,
+			})
+		}
+	}()
+
+	parts := make([]awss3types.CompletedPart, 0, (size+int64(s3PartSize)-1)/int64(s3PartSize))
+	for number, remaining := int32(1), size; remaining > 0; number++ {
+		partSize := min(remaining, int64(s3PartSize))
+		result, partErr := client.UploadPart(ctx, &awss3.UploadPartInput{
+			Bucket:        bucket,
+			Key:           key,
+			UploadId:      started.UploadId,
+			PartNumber:    aws.Int32(number),
+			Body:          io.LimitReader(in, partSize),
+			ContentLength: aws.Int64(partSize),
+		})
+		if partErr != nil {
+			return fmt.Errorf("upload 123Pan temporary S3 part %d: %w", number, partErr)
+		}
+		if result.ETag == nil || *result.ETag == "" {
+			return fmt.Errorf("123Pan temporary S3 part %d returned no ETag", number)
+		}
+		parts = append(parts, awss3types.CompletedPart{
+			ETag:       result.ETag,
+			PartNumber: aws.Int32(number),
+		})
+		remaining -= partSize
+	}
+	_, err = client.CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{
+		Bucket:   bucket,
+		Key:      key,
+		UploadId: started.UploadId,
+		MultipartUpload: &awss3types.CompletedMultipartUpload{
+			Parts: parts,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("complete 123Pan temporary S3 multipart upload: %w", err)
+	}
+	completed = true
 	return nil
 }
 
-func (f *Fs) completeUpload(ctx context.Context, preuploadID string) (int64, error) {
-	for attempt := 0; attempt < completionAttempts; attempt++ {
-		var response api.UploadCompleteResponse
-		err := f.callJSON(ctx, &rest.Opts{
-			Method: http.MethodPost,
-			Path:   "/upload/v2/file/upload_complete",
-		}, map[string]any{"preuploadID": preuploadID}, &response)
+func (f *Fs) preSignedURLs(ctx context.Context, upload *api.UploadResponse, start, end int, multipart bool) (map[string]string, error) {
+	endpoint := "/file/s3_upload_object/auth"
+	if multipart {
+		endpoint = "/file/s3_repare_upload_parts_batch"
+	}
+	var response api.S3PreSignedURLsResponse
+	err := f.callJSON(ctx, &rest.Opts{
+		Method: http.MethodPost,
+		Path:   endpoint,
+	}, &api.S3URLsRequest{
+		StorageNode:     upload.Data.StorageNode,
+		Bucket:          upload.Data.Bucket,
+		Key:             upload.Data.Key,
+		PartNumberEnd:   end,
+		PartNumberStart: start,
+		UploadID:        upload.Data.UploadID,
+	}, &response)
+	if err != nil {
+		return nil, fmt.Errorf("get 123Pan temporary S3 URLs: %w", err)
+	}
+	if len(response.Data.PreSignedURLs) == 0 {
+		return nil, errors.New("123Pan returned no temporary S3 URLs")
+	}
+	return response.Data.PreSignedURLs, nil
+}
+
+func (f *Fs) uploadPreSignedPart(ctx context.Context, uploadURL string, in io.Reader, size int64) error {
+	// A presigned request consumes a potentially non-seekable no_buffer source;
+	// retrying it would upload an incomplete part.
+	return f.pacer.CallNoRetry(func() (bool, error) {
+		response, err := f.downloadSrv.Call(ctx, &rest.Opts{
+			Method:        http.MethodPut,
+			RootURL:       uploadURL,
+			Body:          in,
+			ContentLength: &size,
+			NoResponse:    true,
+		})
+		if err != nil && fserrors.ShouldRetry(err) {
+			return true, err
+		}
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		return false, err
+	})
+}
+
+func (f *Fs) uploadWithPreSignedURLs(ctx context.Context, upload *api.UploadResponse, in io.Reader, size int64) error {
+	partCount := int((size + int64(s3PartSize) - 1) / int64(s3PartSize))
+	for start := 1; start <= partCount; {
+		end := start + 1
+		multipart := partCount > 1
+		if multipart {
+			end = min(start+10, partCount+1)
+		}
+		urls, err := f.preSignedURLs(ctx, upload, start, end, multipart)
 		if err != nil {
-			return 0, fmt.Errorf("complete 123Pan upload: %w", err)
+			return err
 		}
-		if response.Data.Completed && response.Data.FileID != 0 {
-			return response.Data.FileID, nil
-		}
-		if attempt+1 < completionAttempts {
-			select {
-			case <-ctx.Done():
-				return 0, ctx.Err()
-			case <-time.After(time.Second):
+		for number := start; number < end; number++ {
+			partSize := int64(s3PartSize)
+			if remaining := size - int64(number-1)*int64(s3PartSize); remaining < partSize {
+				partSize = remaining
+			}
+			uploadURL := urls[strconv.Itoa(number)]
+			if uploadURL == "" {
+				return fmt.Errorf("123Pan returned no temporary S3 URL for part %d", number)
+			}
+			if err = f.uploadPreSignedPart(ctx, uploadURL, io.LimitReader(in, partSize), partSize); err != nil {
+				return fmt.Errorf("upload 123Pan temporary S3 part %d: %w", number, err)
 			}
 		}
+		start = end
 	}
-	return 0, errors.New("123Pan upload did not complete before the polling deadline")
+	response := new(api.Response)
+	if err := f.callJSON(ctx, &rest.Opts{
+		Method: http.MethodPost,
+		Path:   "/file/upload_complete/v2",
+	}, &api.S3UploadCompleteRequest{
+		StorageNode: upload.Data.StorageNode,
+		Bucket:      upload.Data.Bucket,
+		FileID:      upload.Data.FileID,
+		FileSize:    size,
+		IsMultipart: partCount > 1,
+		Key:         upload.Data.Key,
+		UploadID:    upload.Data.UploadID,
+	}, response); err != nil {
+		return fmt.Errorf("complete 123Pan temporary S3 upload: %w", err)
+	}
+	return nil
 }
 
 func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, remote string, options ...fs.OpenOption) (*Object, error) {
@@ -913,9 +1133,6 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, remote st
 	defer prepared.close()
 	if prepared.size < 0 {
 		return nil, errors.New("123Pan uploads require a known size")
-	}
-	if prepared.size > int64(maxUploadSize) {
-		return nil, fmt.Errorf("123Pan upload size %d exceeds the Open API limit of %d bytes", prepared.size, maxUploadSize)
 	}
 	leaf, parentDirectoryID, err := f.dirCache.FindPath(ctx, remote, true)
 	if err != nil {
@@ -929,7 +1146,7 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, remote st
 	if err != nil {
 		return nil, err
 	}
-	if created.Data.Reuse {
+	if created.Data.Reuse || created.Data.Key == "" {
 		if created.Data.FileID == 0 {
 			return nil, errors.New("123Pan instant upload returned an empty file ID")
 		}
@@ -944,29 +1161,21 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, remote st
 			modTime: src.ModTime(ctx),
 		}, nil
 	}
-	if created.Data.PreuploadID == "" || created.Data.SliceSize <= 0 || len(created.Data.Servers) == 0 {
-		return nil, errors.New("123Pan upload creation returned incomplete multipart information")
+	if created.Data.FileID == 0 {
+		return nil, errors.New("123Pan upload creation returned an empty file ID")
 	}
-	if f.renewer != nil {
-		f.renewer.Start()
-		defer f.renewer.Stop()
+	if created.Data.AccessKeyID != "" && created.Data.SecretAccessKey != "" && created.Data.SessionToken != "" {
+		err = f.uploadWithTemporaryS3(ctx, created, prepared.reader, prepared.size)
+		if err == nil {
+			response := new(api.Response)
+			err = f.callJSON(ctx, &rest.Opts{
+				Method: http.MethodPost,
+				Path:   "/file/upload_complete",
+			}, &api.UploadCompleteRequest{FileID: created.Data.FileID}, response)
+		}
+	} else {
+		err = f.uploadWithPreSignedURLs(ctx, created, prepared.reader, prepared.size)
 	}
-	remaining := prepared.size
-	for partNumber := 1; remaining > 0; partNumber++ {
-		partSize := created.Data.SliceSize
-		if remaining < partSize {
-			partSize = remaining
-		}
-		contents := make([]byte, partSize)
-		if _, err = io.ReadFull(prepared.reader, contents); err != nil {
-			return nil, fmt.Errorf("read 123Pan upload slice %d: %w", partNumber, err)
-		}
-		if err = f.uploadSlice(ctx, created.Data.Servers[0], created.Data.PreuploadID, partNumber, leaf, contents); err != nil {
-			return nil, err
-		}
-		remaining -= partSize
-	}
-	fileID, err := f.completeUpload(ctx, created.Data.PreuploadID)
 	if err != nil {
 		return nil, err
 	}
@@ -974,7 +1183,7 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, remote st
 	return &Object{
 		fs:      f,
 		remote:  remote,
-		id:      fileID,
+		id:      created.Data.FileID,
 		parent:  parentID,
 		size:    prepared.size,
 		md5sum:  strings.ToLower(prepared.md5),
@@ -1011,25 +1220,23 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	if err != nil {
 		return nil, err
 	}
-	fileID, err := f.copy(ctx, source.id, parentID)
-	if err != nil {
+	if err = f.copy(ctx, source, parentID); err != nil {
 		return nil, err
 	}
+	copyRemote := path.Join(parentDir(remote), path.Base(source.remote))
+	copied, err := f.NewObject(ctx, copyRemote)
+	if err != nil {
+		return nil, fmt.Errorf("find copied 123Pan object: %w", err)
+	}
+	result := copied.(*Object)
 	if leaf != path.Base(source.remote) {
-		if err = f.rename(ctx, fileID, leaf); err != nil {
+		if err = f.rename(ctx, result.id, leaf); err != nil {
 			return nil, err
 		}
+		result.remote = remote
 	}
 	f.dirCache.FlushDir(parentDir(remote))
-	return &Object{
-		fs:      f,
-		remote:  remote,
-		id:      fileID,
-		parent:  parentID,
-		size:    source.size,
-		md5sum:  source.md5sum,
-		modTime: source.modTime,
-	}, nil
+	return result, nil
 }
 
 // Move moves src to remote using the 123Pan server-side move API.
@@ -1066,6 +1273,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		size:    source.size,
 		md5sum:  source.md5sum,
 		modTime: source.modTime,
+		s3Key:   source.s3Key,
 	}, nil
 }
 
@@ -1110,7 +1318,7 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 	var response api.UserInfoResponse
 	if err := f.callJSON(ctx, &rest.Opts{
 		Method: http.MethodGet,
-		Path:   "/api/v1/user/info",
+		Path:   "/user/info",
 	}, nil, &response); err != nil {
 		return nil, fmt.Errorf("get 123Pan usage: %w", err)
 	}
@@ -1120,12 +1328,8 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 	}, nil
 }
 
-// Shutdown stops background token renewal.
+// Shutdown releases backend resources.
 func (f *Fs) Shutdown(context.Context) error {
-	if f.renewer != nil {
-		f.renewer.Shutdown()
-		f.renewer = nil
-	}
 	return nil
 }
 
