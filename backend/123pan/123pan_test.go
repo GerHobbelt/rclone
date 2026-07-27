@@ -9,12 +9,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rclone/rclone/backend/123pan/api"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
+	"github.com/rclone/rclone/fs/config/configfile"
+	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/object"
@@ -92,6 +97,21 @@ func TestDirCacheFlushResetsCachedDirectories(t *testing.T) {
 
 	_, found := f.dirCache.Get("directory")
 	require.False(t, found)
+}
+
+// TestNewFsLoadsPersistedSessionToken verifies that a later rclone process can
+// use the web session saved by an earlier one without signing in again.
+func TestNewFsLoadsPersistedSessionToken(t *testing.T) {
+	const token = "persisted-session"
+	m := configmap.Simple{
+		"username":         "user",
+		"password":         obscure.MustObscure("password"),
+		config.ConfigToken: token,
+	}
+
+	got, err := NewFs(context.Background(), "remote", "", m)
+	require.NoError(t, err)
+	require.Equal(t, token, got.(*Fs).accessToken)
 }
 
 // TestPutUsesOrdinaryPreSignedUpload verifies the ordinary upload-request,
@@ -459,12 +479,32 @@ func TestCallJSONRelogsOnceForAccessTokenFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
+	configPath := filepath.Join(t.TempDir(), "rclone.conf")
+	require.NoError(t, os.WriteFile(configPath, []byte("[remote]\nusername = user\npassword = "+obscure.MustObscure("password")+"\n"), 0o600))
+	oldConfigPath := config.GetConfigPath()
+	require.NoError(t, config.SetConfigPath(configPath))
+	configfile.Install()
+	t.Cleanup(func() {
+		require.NoError(t, config.SetConfigPath(oldConfigPath))
+		configfile.Install()
+	})
+
 	f := newAPITestFs(t, server)
+	f.sessionSection = "remote"
 	response := new(api.UserInfoResponse)
 	err := f.callJSON(context.Background(), &rest.Opts{Method: http.MethodGet, Path: "/user/info"}, nil, response)
 	require.NoError(t, err)
 	require.Equal(t, 2, apiRequests)
 	require.Equal(t, 1, logins)
+	stored, found := config.FileGetValue("remote", config.ConfigToken)
+	require.True(t, found)
+	require.Equal(t, "access-2", stored)
+
+	regInfo, err := fs.Find("123pan")
+	require.NoError(t, err)
+	got, err := NewFs(context.Background(), "remote", "", fs.ConfigMap(regInfo.Prefix, regInfo.Options, "remote", nil))
+	require.NoError(t, err)
+	require.Equal(t, "access-2", got.(*Fs).accessToken)
 }
 
 func assertOrdinaryAPIRequest(t *testing.T, request *http.Request) {

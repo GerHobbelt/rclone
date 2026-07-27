@@ -85,6 +85,11 @@ func init() {
 			Required:   true,
 			IsPassword: true,
 		}, {
+			Name:      config.ConfigToken,
+			Help:      "Persisted 123Pan web session token. Set automatically after sign-in.",
+			Advanced:  true,
+			Sensitive: true,
+		}, {
 			Name:     "platform",
 			Help:     "Platform header sent with ordinary 123Pan web API requests.",
 			Default:  defaultPlatform,
@@ -112,8 +117,10 @@ The source must be seekable or reopenable. rclone returns an error rather than s
 
 // Options defines the configuration for this backend.
 type Options struct {
-	Username        string               `config:"username"`
-	Password        string               `config:"password"`
+	Username string `config:"username"`
+	Password string `config:"password"`
+	// Token is the persisted ordinary web session token.
+	Token           string               `config:"token"`
 	Platform        string               `config:"platform"`
 	HashMemoryLimit fs.SizeSuffix        `config:"hash_memory_limit"`
 	NoBuffer        bool                 `config:"no_buffer"`
@@ -122,19 +129,21 @@ type Options struct {
 
 // Fs represents a 123Pan remote.
 type Fs struct {
-	name        string
-	root        string
-	opt         Options
-	features    *fs.Features
-	srv         *rest.Client
-	loginSrv    *rest.Client
-	downloadSrv *rest.Client
-	dirCache    *dircache.DirCache
-	pacer       *fs.Pacer
-	authMu      sync.Mutex
-	accessToken string
-	generation  uint64
-	copyDelay   time.Duration
+	name           string
+	root           string
+	opt            Options
+	features       *fs.Features
+	srv            *rest.Client
+	loginSrv       *rest.Client
+	downloadSrv    *rest.Client
+	dirCache       *dircache.DirCache
+	pacer          *fs.Pacer
+	sessionStore   configmap.Mapper
+	sessionSection string
+	authMu         sync.Mutex
+	accessToken    string
+	generation     uint64
+	copyDelay      time.Duration
 }
 
 // Object represents a 123Pan file.
@@ -183,8 +192,10 @@ func Config(ctx context.Context, name string, m configmap.Mapper, configIn fs.Co
 			opt.Platform = defaultPlatform
 		}
 		backend := &Fs{
-			opt:      *opt,
-			loginSrv: rest.NewClient(fshttp.NewClient(ctx)).SetRoot(loginRootURL),
+			opt:            *opt,
+			loginSrv:       rest.NewClient(fshttp.NewClient(ctx)).SetRoot(loginRootURL),
+			sessionStore:   m,
+			sessionSection: persistentConfigName(m),
 		}
 		if _, _, err := backend.session(ctx); err != nil {
 			return nil, fmt.Errorf("sign in to 123Pan: %w", err)
@@ -209,14 +220,17 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		opt.Platform = defaultPlatform
 	}
 	f := &Fs{
-		name:        name,
-		root:        root,
-		opt:         *opt,
-		srv:         rest.NewClient(fshttp.NewClient(ctx)).SetRoot(apiRootURL),
-		loginSrv:    rest.NewClient(fshttp.NewClient(ctx)).SetRoot(loginRootURL),
-		downloadSrv: rest.NewClient(fshttp.NewClient(ctx)),
-		pacer:       fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep))),
-		copyDelay:   copyPollInterval,
+		name:           name,
+		root:           root,
+		opt:            *opt,
+		srv:            rest.NewClient(fshttp.NewClient(ctx)).SetRoot(apiRootURL),
+		loginSrv:       rest.NewClient(fshttp.NewClient(ctx)).SetRoot(loginRootURL),
+		downloadSrv:    rest.NewClient(fshttp.NewClient(ctx)),
+		pacer:          fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep))),
+		sessionStore:   m,
+		sessionSection: persistentConfigName(m),
+		accessToken:    opt.Token,
+		copyDelay:      copyPollInterval,
 	}
 	f.dirCache = dircache.New(root, rootID, f)
 	f.features = (&fs.Features{
@@ -226,14 +240,18 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err := f.dirCache.FindRoot(ctx, false); err != nil {
 		newRoot, remote := dircache.SplitPath(root)
 		tempF := &Fs{
-			name:        f.name,
-			root:        newRoot,
-			opt:         f.opt,
-			srv:         f.srv,
-			loginSrv:    f.loginSrv,
-			downloadSrv: f.downloadSrv,
-			pacer:       f.pacer,
-			copyDelay:   f.copyDelay,
+			name:           f.name,
+			root:           newRoot,
+			opt:            f.opt,
+			srv:            f.srv,
+			loginSrv:       f.loginSrv,
+			downloadSrv:    f.downloadSrv,
+			pacer:          f.pacer,
+			sessionStore:   f.sessionStore,
+			sessionSection: f.sessionSection,
+			accessToken:    f.accessToken,
+			generation:     f.generation,
+			copyDelay:      f.copyDelay,
 		}
 		tempF.dirCache = dircache.New(newRoot, rootID, tempF)
 		if err = tempF.dirCache.FindRoot(ctx, false); err != nil {
@@ -248,6 +266,9 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		f.features.Fill(ctx, tempF)
 		f.dirCache = tempF.dirCache
 		f.root = tempF.root
+		f.opt.Token = tempF.opt.Token
+		f.accessToken = tempF.accessToken
+		f.generation = tempF.generation
 		return f, fs.ErrorIsFile
 	}
 	return f, nil
@@ -352,9 +373,36 @@ func (f *Fs) loginLocked(ctx context.Context) (string, uint64, error) {
 		}
 		return "", 0, errors.New(response.Message)
 	}
+	if err := f.saveSessionToken(response.Data.Token); err != nil {
+		return "", 0, err
+	}
 	f.accessToken = response.Data.Token
 	f.generation++
+	f.opt.Token = f.accessToken
 	return f.accessToken, f.generation, nil
+}
+
+// persistentConfigName returns the config section used for durable session data.
+func persistentConfigName(m configmap.Mapper) string {
+	persistent, ok := m.(configmap.PersistentMapper)
+	if !ok {
+		return ""
+	}
+	return persistent.PersistentConfigName()
+}
+
+// saveSessionToken stores token durably when this Fs has a config section.
+func (f *Fs) saveSessionToken(token string) error {
+	if f.sessionSection != "" {
+		if err := config.SetValueAndSave(f.sessionSection, config.ConfigToken, token); err != nil {
+			return fmt.Errorf("save 123Pan session token: %w", err)
+		}
+		return nil
+	}
+	if f.sessionStore != nil {
+		f.sessionStore.Set(config.ConfigToken, token)
+	}
+	return nil
 }
 
 // refreshSessionIfCurrent establishes a new session only when generation is

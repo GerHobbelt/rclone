@@ -13,8 +13,9 @@
 - Configure a 123Pan account `username` and `password`.
 - Store the password with rclone's normal obscured-password option handling.
 - Sign in through `https://login.123pan.com/api/user/sign_in`.
-- Use the returned access token only as an in-memory web session.
-- Do not configure a refresh token, token broker, token server, or persistent
+- Persist the returned access token as the sensitive `token` option.
+- Reuse a persisted token in a later rclone process before signing in again.
+- Do not configure a refresh token, token broker, token server, or
   rotating-token state for this backend.
 - Validate submitted credentials during interactive configuration.
 - Lazily establish the runtime session when the first authenticated operation
@@ -29,15 +30,16 @@
 - Use `https://yun.123pan.com/b/api` as the API root, matching OpenList's
   ordinary driver.
 - Send the normal web headers:
-  - `Authorization: Bearer <in-memory session>`.
+  - `Authorization: Bearer <persisted session token>`.
   - `Platform`, defaulting to `web`.
   - `App-Version: 3`.
   - OpenList-compatible `Origin`, `Referer`, and user-agent headers.
 - Append OpenList's time-dependent CRC32 query signature to every authenticated
   request.
 - Keep the `platform` header configurable as an advanced option.
-- Treat the session token as an ordinary process-local web session, not as a
-  refreshable credential shared between rclone processes.
+- Treat the session token as a replaceable bearer credential.
+- On a 401, sign in once and atomically replace the persisted token through
+  rclone's normal config writer before retrying the failed request.
 
 ## Filesystem operations
 
