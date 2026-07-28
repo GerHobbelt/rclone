@@ -157,6 +157,31 @@ func TestPutUsesOrdinaryPreSignedUpload(t *testing.T) {
 	require.Equal(t, "42", stored.(*Object).ID())
 }
 
+// TestPutFindsInstantUploadWithoutFileID replays a deduplicated upload whose
+// successful upload_request response omits the resulting object ID.
+func TestPutFindsInstantUploadWithoutFileID(t *testing.T) {
+	contents := []byte("already stored")
+	md5sum := fmt.Sprintf("%x", md5.Sum(contents))
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		assertOrdinaryAPIRequest(t, request)
+		switch request.URL.Path {
+		case "/b/api/file/upload_request":
+			_, _ = response.Write([]byte(`{"code":0,"data":{"Reuse":true}}`))
+		case "/b/api/file/list/new":
+			_, _ = response.Write([]byte(fmt.Sprintf(`{"code":0,"data":{"Next":"-1","Total":1,"InfoList":[{"FileName":"file.txt","FileId":42,"ParentFileId":0,"Type":0,"Size":%d,"Etag":"%s"}]}}`, len(contents), md5sum)))
+		default:
+			t.Fatalf("unexpected endpoint %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	f := newAPITestFs(t, server)
+	src := object.NewStaticObjectInfo("file.txt", time.Now(), int64(len(contents)), true, map[hash.Type]string{hash.MD5: md5sum}, nil)
+	stored, err := f.Put(context.Background(), bytes.NewReader(contents), src)
+	require.NoError(t, err)
+	require.Equal(t, "42", stored.(*Object).ID())
+}
+
 // TestPutUsesTemporaryS3Credentials verifies that temporary S3 credentials use
 // rclone's HTTP client, upload the object, and complete the ordinary API flow.
 func TestPutUsesTemporaryS3Credentials(t *testing.T) {
@@ -381,6 +406,32 @@ func TestMkdirUsesOrdinaryUploadRequest(t *testing.T) {
 			require.Equal(t, "directory", body["fileName"])
 			require.Equal(t, float64(1), body["type"])
 			_, _ = response.Write([]byte(`{"code":0,"data":{"FileId":9}}`))
+		default:
+			t.Fatalf("unexpected endpoint %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	f := newAPITestFs(t, server)
+	require.NoError(t, f.Mkdir(context.Background(), "directory"))
+}
+
+// TestMkdirAcceptsSuccessfulResponseWithoutFileID replays the ordinary API
+// response shape where upload_request succeeds without returning the new ID.
+func TestMkdirAcceptsSuccessfulResponseWithoutFileID(t *testing.T) {
+	listCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		assertOrdinaryAPIRequest(t, request)
+		switch request.URL.Path {
+		case "/b/api/file/list/new":
+			listCalls++
+			if listCalls == 1 {
+				_, _ = response.Write([]byte(`{"code":0,"data":{"Next":"-1","Total":0,"InfoList":[]}}`))
+				return
+			}
+			_, _ = response.Write([]byte(`{"code":0,"data":{"Next":"-1","Total":1,"InfoList":[{"FileName":"directory","FileId":9,"ParentFileId":0,"Type":1}]}}`))
+		case "/b/api/file/upload_request":
+			_, _ = response.Write([]byte(`{"code":0,"data":{}}`))
 		default:
 			t.Fatalf("unexpected endpoint %s", request.URL.Path)
 		}

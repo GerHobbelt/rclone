@@ -619,6 +619,11 @@ func (f *Fs) CreateDir(ctx context.Context, directoryID, leaf string) (string, e
 		return "", fmt.Errorf("create 123Pan directory %q: %w", leaf, err)
 	}
 	if response.Data.FileID == 0 {
+		if id, found, findErr := f.FindLeaf(ctx, directoryID, leaf); findErr != nil {
+			return "", fmt.Errorf("find newly created 123Pan directory %q: %w", leaf, findErr)
+		} else if found {
+			return id, nil
+		}
 		return "", errors.New("123Pan mkdir returned an empty directory ID")
 	}
 	return strconv.FormatInt(response.Data.FileID, 10), nil
@@ -1196,7 +1201,16 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, remote st
 	}
 	if created.Data.Reuse || created.Data.Key == "" {
 		if created.Data.FileID == 0 {
-			return nil, errors.New("123Pan instant upload returned an empty file ID")
+			file, findErr := f.findFile(ctx, parentID, leaf)
+			if findErr != nil {
+				return nil, fmt.Errorf("find instant 123Pan upload %q: %w", leaf, findErr)
+			}
+			if file == nil || file.Type != 0 {
+				return nil, errors.New("123Pan instant upload returned an empty file ID")
+			}
+			file.ParentFileID = parentID
+			f.dirCache.FlushDir(parentDir(remote))
+			return f.newObject(remote, file), nil
 		}
 		f.dirCache.FlushDir(parentDir(remote))
 		return &Object{
