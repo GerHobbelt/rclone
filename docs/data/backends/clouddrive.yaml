@@ -1,0 +1,16 @@
+backend: clouddrive
+name: CloudDrive
+tier: Tier 4
+maintainers: External
+features_score: 0
+integration_tests: Passing
+data_integrity: Other
+performance: High
+adoption: Some use
+docs: Full
+security: High
+virtual: false
+remote: 'TestCloudDrive:'
+features: null
+hashes: null
+precision: null

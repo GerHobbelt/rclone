@@ -53,3 +53,13 @@ func TestGetBackendConfig(t *testing.T) {
 	assert.Equal(t, expectedMemoryConfig, conf, "parsed memory.yaml should match")
 
 }
+
+func TestForkBackendsHaveOverviewData(t *testing.T) {
+	for _, name := range []string{"115", "123pan", "alist", "clouddrive"} {
+		t.Run(name, func(t *testing.T) {
+			conf, err := GetBackendConfig(name)
+			require.NoError(t, err)
+			require.Equal(t, name, conf.Backend)
+		})
+	}
+}
