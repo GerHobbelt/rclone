@@ -15,12 +15,14 @@ import (
 
 	"github.com/rclone/rclone/backend/clouddrive/api"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/pacer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -49,6 +51,9 @@ type Options struct {
 	Insecure     bool        `config:"insecure"`
 	DownloadHost string      `config:"download_host"`
 	Timeout      fs.Duration `config:"timeout"`
+
+	// Enc encodes names used by the CloudDrive API.
+	Enc encoder.MultiEncoder `config:"encoding"`
 }
 
 // Fs represents a remote clouddrive
@@ -123,6 +128,11 @@ func init() {
 			Default:  fs.Duration(defaultTimeout),
 			Help:     "Dial timeout for gRPC connections.",
 			Advanced: true,
+		}, {
+			Name:     config.ConfigEncoding,
+			Help:     config.ConfigEncodingHelp,
+			Advanced: true,
+			Default:  encoder.EncodeRaw,
 		}},
 	})
 }
@@ -332,7 +342,7 @@ func (f *Fs) fullPath(remote string) string {
 	if remote == "" {
 		return "/"
 	}
-	return "/" + remote
+	return "/" + f.opt.Enc.FromStandardPath(remote)
 }
 
 // timestampToTime safely converts a protobuf timestamp.
@@ -373,7 +383,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 				return f.shouldRetry(ctx, recErr)
 			}
 			for _, item := range resp.GetSubFiles() {
-				remote := path.Join(dir, item.GetName())
+				remote := path.Join(dir, f.opt.Enc.ToStandardName(item.GetName()))
 				if item.GetIsDirectory() || item.GetFileType() == api.CloudDriveFile_Directory {
 					entries = append(entries, fs.NewDir(remote, timestampToTime(item.GetWriteTime())))
 				} else {
@@ -701,7 +711,7 @@ func (f *Fs) rename(ctx context.Context, remote, newName string) error {
 	err := f.pacer.Call(func() (bool, error) {
 		req := &api.RenameFileRequest{
 			TheFilePath: f.fullPath(remote),
-			NewName:     newName,
+			NewName:     f.opt.Enc.FromStandardName(newName),
 		}
 		res, err := f.client.RenameFile(ctx, req)
 		if err != nil {
@@ -748,11 +758,8 @@ func (o *Object) Remote() string {
 	return o.remote
 }
 
-// String returns a description
+// String returns the path of the object.
 func (o *Object) String() string {
-	if o.id != "" {
-		return o.id
-	}
 	return o.remote
 }
 
@@ -858,7 +865,7 @@ func (o *Object) toItem() *api.CloudDriveFile {
 	}
 	item := &api.CloudDriveFile{
 		Id:           o.id,
-		Name:         path.Base(o.remote),
+		Name:         o.fs.opt.Enc.FromStandardName(path.Base(o.remote)),
 		FullPathName: o.fs.fullPath(o.remote),
 		Size:         o.size,
 		IsDirectory:  false,
